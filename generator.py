@@ -1,14 +1,18 @@
 """
-Hunyuan T2I Turbo generator for Modly (download target: shared models dir).
+Hunyuan T2I Turbo generator for Modly.
 
-This generator ensures model files are present in Modly's shared models directory
-and will download them there when the user clicks the purple Download button.
+This module exposes:
+ - HunyuanT2IGenerator (BaseGenerator subclass) used by Modly for generation.
+ - A module-level function `hf_download(repo_id: str, model_id: str) -> dict`
+   which Modly's PythonBridge can call when the user presses the Download button.
+   The function downloads the HF repo into the shared models directory and
+   returns a dict with success/path/message for Modly to display.
 
-Key points:
- - Uses MODELS_DIR env var when available; otherwise falls back to ~/ModlyData/models.
- - Downloads to a subfolder named after the repo (slashes replaced with underscores).
- - Supports HF auth tokens via HUGGINGFACE_HUB_TOKEN / HF_TOKEN / HUGGINGFACE_TOKEN.
- - Loads pipeline from the shared models directory (so Modly's UI and runtime share the same files).
+Notes:
+ - The generator and hf_download both use MODELS_DIR env var when present,
+   otherwise fallback to ~/ModlyData/models.
+ - For gated repos, set HUGGINGFACE_HUB_TOKEN (or HF_TOKEN / HUGGINGFACE_TOKEN)
+   in the extension process environment (Modly should inject this).
 """
 import os
 import sys
@@ -48,6 +52,56 @@ def _repo_target_dir(repo_id: str) -> Path:
     return models_dir / safe_name
 
 
+def hf_download(repo_id: str, model_id: Optional[str] = None) -> dict:
+    """
+    Module-level download function intended to be called by Modly's PythonBridge
+    when the user presses the Download button.
+
+    Args:
+        repo_id: Hugging Face repo id (e.g., "TencentARC/HunyuanDiT-Turbo")
+        model_id: optional model id string (unused here but provided by Modly)
+
+    Returns:
+        dict: { "success": bool, "path": str or None, "message": str }
+    """
+    from huggingface_hub import snapshot_download
+    from httpx import HTTPStatusError
+
+    repo = repo_id or DEFAULT_HF_REPO
+    target_dir = _repo_target_dir(repo)
+    token = _get_hf_token()
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    last_exc = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            snapshot_download(
+                repo_id=repo,
+                local_dir=str(target_dir),
+                local_dir_use_symlinks=False,
+                use_auth_token=token,
+            )
+            return {"success": True, "path": str(target_dir), "message": "Download complete"}
+        except HTTPStatusError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status == 401:
+                return {
+                    "success": False,
+                    "path": None,
+                    "message": (
+                        "401 Unauthorized: This Hugging Face repository requires authentication. "
+                        "Provide a valid Hugging Face token via HUGGINGFACE_HUB_TOKEN or HF_TOKEN."
+                    ),
+                }
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+        time.sleep(2)
+
+    return {"success": False, "path": None, "message": f"Download failed: {last_exc}"}
+
+
 class HunyuanT2IGenerator(BaseGenerator):
     MODEL_ID = "hunyuan_t2i_turbo"
     DISPLAY_NAME = "Hunyuan T2I Turbo"
@@ -66,7 +120,6 @@ class HunyuanT2IGenerator(BaseGenerator):
     def _download_weights(self):
         """
         Download the HF repo into the shared models directory.
-        This is the same location the setup.py download action writes to.
         """
         from huggingface_hub import snapshot_download
         from httpx import HTTPStatusError
