@@ -139,3 +139,16 @@ def uninstall():
             log(f"Failed to remove marker: {e}")
 
     log("Uninstall complete.")
+
+if __name__ == "__main__":
+    # Allow Modly to call install/uninstall via script entrypoint
+    if len(sys.argv) >= 2:
+        cmd = sys.argv[1].lower()
+        if cmd == "install":
+            install()
+        elif cmd == "uninstall":
+            uninstall()
+        else:
+            print("Usage: python setup.py [install|uninstall]")
+    else:
+        print("Usage: python setup.py [install|uninstall]")
