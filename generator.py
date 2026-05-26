@@ -1,15 +1,12 @@
 """
-Hunyuan T2I Turbo generator for Modly (text-to-image).
+Hunyuan T2I Turbo generator for Modly (single-file replacement).
 
-Replace your existing generator.py with this file.
-
-Key features:
- - Module-level download entrypoints: hf_download, download_model, download
- - Uses MODELS_DIR env var or fallback to ~/ModlyData/models
- - Reads manifest.json to honor hf_skip_prefixes and download_check for the node
- - Writes a timestamped marker file when invoked so you can confirm invocation
- - Uses huggingface_hub.snapshot_download with optional auth token
- - Minimal changes; keeps generation behavior intact
+- Module-level download entrypoints: hf_download, download_model, download
+- Uses MODELS_DIR env var or fallback to ~/ModlyData/models
+- Reads manifest.json to honor hf_skip_prefixes and download_check for the node
+- Writes a timestamped marker file when invoked so you can confirm invocation
+- Uses huggingface_hub.snapshot_download with optional auth token
+- Minimal changes; keeps generation behavior intact
 """
 import io
 import os
@@ -64,8 +61,7 @@ def _write_invocation_marker(ext_dir: Path, repo_id: str) -> Path:
 def _load_manifest_ignore_patterns(ext_dir: Path, model_id: Optional[str]) -> List[str]:
     """
     Read manifest.json in extension root and return hf_skip_prefixes for the node
-    whose id matches model_id (node id format may be 'model_id/node' or 'node').
-    If not found, return a sensible default ignore list.
+    whose id matches model_id. If not found, return a sensible default ignore list.
     """
     manifest_path = ext_dir / "manifest.json"
     ignore = ["*.md", "*.txt", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"]
@@ -75,19 +71,20 @@ def _load_manifest_ignore_patterns(ext_dir: Path, model_id: Optional[str]) -> Li
         import json
         m = json.loads(manifest_path.read_text(encoding="utf-8"))
         nodes = m.get("nodes", []) or []
-        # model_id param may be like "hunyuan_t2i_turbo/generate" or "hunyuan_t2i_turbo%2Fgenerate"
-        mid = (model_id or "").split("/")[-1] if model_id else None
-        mid = mid or (model_id or "")
+        mid = None
+        if model_id:
+            # model_id may be URL-encoded or include node suffix; normalize
+            mid = model_id.split("/")[-1]
+            mid = mid.replace("%2F", "/")
         for node in nodes:
             nid = node.get("id", "")
-            if nid == mid or (model_id and model_id.endswith("/" + nid)):
-                skips = node.get("hf_skip_prefixes") or node.get("hf_skip_prefixes", [])
+            if nid and (nid == mid or (model_id and model_id.endswith("/" + nid))):
+                skips = node.get("hf_skip_prefixes") or []
                 if isinstance(skips, list):
                     for p in skips:
                         ignore.append(p)
                         if isinstance(p, str) and p.endswith("/"):
                             ignore.append(p + "*")
-                # also include node's download_check parent patterns if present
                 dc = node.get("download_check")
                 if isinstance(dc, str) and "/" in dc:
                     prefix = dc.split("/")[0] + "/"
@@ -166,7 +163,7 @@ def hf_download(repo_id: str, model_id: Optional[str] = None) -> Dict:
         return {"success": False, "path": None, "message": err}
 
 
-# Aliases for compatibility
+# Aliases for compatibility with different mappings Modly might use
 def download_model(repo_id: str, model_id: Optional[str] = None) -> Dict:
     return hf_download(repo_id, model_id)
 
