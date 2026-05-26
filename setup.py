@@ -8,7 +8,7 @@ import subprocess
 
 EXT_ID = "hunyuan_t2i_turbo_modly"
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
-DOWNLOAD_CHECK = "config.json"   # sentinel file to verify download
+DOWNLOAD_CHECK = "config.json"
 DEPS_MARKER = ".deps_installed_v1"
 
 def log(msg: str):
