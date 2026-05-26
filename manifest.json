@@ -1,0 +1,40 @@
+{
+  "id": "hunyuan_t2i_turbo_modly",
+  "name": "HunyuanDiT Turbo Text to Image",
+  "version": "0.1.0",
+  "description": "Standalone Modly extension providing HunyuanDiT-Turbo text-to-image generation.",
+  "author": "your-name",
+  "license": "MIT",
+  "install": {
+    "script": "setup.py",
+    "entrypoint": "install"
+  },
+  "uninstall": {
+    "script": "setup.py",
+    "entrypoint": "uninstall"
+  },
+  "nodes": [
+    {
+      "id": "hunyuan_t2i_turbo",
+      "type": "model",
+      "name": "HunyuanDiT Turbo",
+      "description": "Fast Hunyuan text-to-image generator (Turbo).",
+      "entry": "models/hunyuan_t2i_turbo/generator.py",
+      "inputs": [
+        { "name": "prompt", "type": "string", "default": "", "label": "Prompt" },
+        { "name": "negative_prompt", "type": "string", "default": "", "label": "Negative Prompt" },
+        { "name": "steps", "type": "int", "default": 28, "label": "Inference Steps", "min": 1, "max": 200 },
+        { "name": "guidance_scale", "type": "float", "default": 7.5, "label": "Guidance Scale", "min": 0.0, "max": 30.0 },
+        { "name": "width", "type": "int", "default": 512, "label": "Width", "min": 64, "max": 2048 },
+        { "name": "height", "type": "int", "default": 512, "label": "Height", "min": 64, "max": 2048 },
+        { "name": "seed", "type": "int", "default": -1, "label": "Seed", "min": -1 }
+      ],
+      "outputs": [
+        { "name": "image", "type": "image", "label": "Generated Image" }
+      ],
+      "ui": {
+        "node": "ui/hunyuan_t2i_turbo/Node.tsx"
+      }
+    }
+  ]
+}
