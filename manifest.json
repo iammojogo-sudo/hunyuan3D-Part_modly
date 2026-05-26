@@ -6,20 +6,9 @@
   "author": "iammojogo",
   "license": "MIT",
   "vram_gb": 6,
-  "tags": [
-    "text-to-image",
-    "hunyuan",
-    "diffusers",
-    "t2i"
-  ],
-  "install": {
-    "script": "setup.py",
-    "entrypoint": "install"
-  },
-  "uninstall": {
-    "script": "setup.py",
-    "entrypoint": "uninstall"
-  },
+  "tags": ["text-to-image","hunyuan","diffusers","t2i"],
+  "install": { "script": "setup.py", "entrypoint": "install" },
+  "uninstall": { "script": "setup.py", "entrypoint": "uninstall" },
   "generator_class": "hunyuan_t2i_turbo_generator.Generator",
   "nodes": [
     {
@@ -43,9 +32,7 @@
       "outputs": [
         { "name": "image", "type": "image", "label": "Generated Image" }
       ],
-      "ui": {
-        "node": "ui/hunyuan_t2i_turbo/Node.tsx"
-      }
+      "ui": { "node": "ui/hunyuan_t2i_turbo/Node.tsx" }
     }
   ]
 }
