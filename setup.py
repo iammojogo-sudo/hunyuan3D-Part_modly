@@ -44,15 +44,10 @@ def _pip_install(packages):
     subprocess.check_call(cmd)
 
 def install():
-    """
-    Full install: installs Python deps and downloads model weights into
-    extension/models/<sanitized_repo>. Idempotent.
-    """
     root = _extension_root()
     final_dir = _final_model_dir()
     marker = _marker_path()
 
-    # 1) Install dependencies (only if marker missing)
     if not os.path.exists(marker):
         log("Dependencies not found. Installing required Python packages now.")
         try:
@@ -78,7 +73,6 @@ def install():
     else:
         log("Dependencies already installed; skipping pip install.")
 
-    # 2) Download model weights if not present or incomplete
     if os.path.exists(final_dir) and _verify_downloaded_model(final_dir):
         log(f"Model already present at {final_dir}; skipping download.")
         return
@@ -119,9 +113,6 @@ def install():
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 def uninstall():
-    """
-    Remove model folder and dependency marker. Do not attempt to uninstall pip packages.
-    """
     final_dir = _final_model_dir()
     marker = _marker_path()
 
