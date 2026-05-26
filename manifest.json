@@ -1,39 +1,21 @@
 {
-  "id": "hunyuan_t2i_turbo_modly",
-  "name": "HunyuanDiT Turbo Text to Image",
+  "id": "hunyuan_t2i",
+  "name": "Hunyuan T2I Turbo",
   "type": "model",
   "version": "0.1.0",
-  "description": "HunyuanDiT-Turbo text-to-image generator for Modly.",
-  "author": "iammojogo",
   "vram_gb": 6,
-  "tags": ["text-to-image","hunyuan","t2i","turbo"],
-  "install": { "script": "setup.py", "entrypoint": "install" },
-  "uninstall": { "script": "setup.py", "entrypoint": "uninstall" },
-  "generator_class": "Generator",
-  "entry": "generator.py",
-  "hf_repo": "TencentARC/HunyuanDiT-Turbo",
-  "download_check": "config.json",
   "nodes": [
     {
-      "id": "hunyuan_t2i_turbo",
-      "name": "HunyuanDiT Turbo",
-      "type": "model",
-      "entry": "generator.py",
-      "generator_class": "Generator",
-      "hf_repo": "TencentARC/HunyuanDiT-Turbo",
-      "download_check": "config.json",
-      "inputs": [
-        { "name": "prompt", "type": "string", "default": "", "label": "Prompt" },
-        { "name": "negative_prompt", "type": "string", "default": "", "label": "Negative Prompt" },
-        { "name": "steps", "type": "int", "default": 28, "label": "Inference Steps", "min": 1, "max": 200 },
-        { "name": "guidance_scale", "type": "float", "default": 7.5, "label": "Guidance Scale", "min": 0.0, "max": 30.0 },
-        { "name": "width", "type": "int", "default": 512, "label": "Width", "min": 64, "max": 2048 },
-        { "name": "height", "type": "int", "default": 512, "label": "Height", "min": 64, "max": 2048 },
-        { "name": "seed", "type": "int", "default": -1, "label": "Seed", "min": -1 }
-      ],
-      "outputs": [
-        { "name": "image", "type": "image", "label": "Generated Image" }
+      "id": "generate",
+      "name": "Generate Image",
+      "input": "text",
+      "output": "image",
+      "hf_repo": "Tencent-Hunyuan/HunyuanDiT",
+      "params_schema": [
+        {"id":"num_inference_steps","label":"Steps","type":"int","default":20},
+        {"id":"seed","label":"Seed","type":"int","default":42}
       ]
     }
-  ]
+  ],
+  "generator_class": "HunyuanT2IGenerator"
 }
