@@ -1,10 +1,12 @@
 """
-Modly extension setup script for Hunyuan T2I Turbo.
+Modly extension setup script (fixed).
 
-Creates a venv, installs runtime packages, and (optionally) pre-downloads
-the Hugging Face repo using an auth token if required.
+This version avoids invoking the venv pip executable directly (which can fail
+when upgrading pip on Windows). Instead it runs the venv Python with `-m pip`
+for all package installs and upgrades. It also handles authenticated HF
+snapshot downloads (when HUGGINGFACE_HUB_TOKEN / HF_TOKEN is present).
 
-Usage (called by Modly):
+Called by Modly at install time:
     python setup.py <json_args>
 
 json_args keys:
@@ -22,20 +24,24 @@ from pathlib import Path
 
 IS_WIN = platform.system() == "Windows"
 
+# Default HF repo used for optional pre-download. Change if you want a different repo.
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
 
 
-def pip(venv, *args):
-    pip_exe = venv / ("Scripts/pip.exe" if IS_WIN else "bin/pip")
-    subprocess.run([str(pip_exe)] + list(args), check=True)
+def run_venv_pip(venv_python: Path, *pip_args, check=True):
+    """
+    Run the venv Python with -m pip so pip upgrades/installations are robust on Windows.
+    Example: run_venv_pip(venv_python, "install", "--upgrade", "pip")
+    """
+    cmd = [str(venv_python), "-m", "pip"] + list(pip_args)
+    subprocess.run(cmd, check=check)
 
 
-def python_exe_in_venv(venv):
+def python_exe_in_venv(venv: Path) -> Path:
     return venv / ("Scripts/python.exe" if IS_WIN else "bin/python")
 
 
 def _get_hf_token():
-    # Accept common env var names
     for k in ("HUGGINGFACE_HUB_TOKEN", "HF_TOKEN", "HUGGINGFACE_TOKEN"):
         v = os.environ.get(k)
         if v:
@@ -43,10 +49,15 @@ def _get_hf_token():
     return None
 
 
-def _snapshot_download_with_token(repo_id, local_dir, token=None, attempts=3):
+def _snapshot_download_with_token(repo_id: str, local_dir: str, token: str | None, attempts: int = 3):
+    """
+    Use huggingface_hub.snapshot_download with retries and explicit token passing.
+    Raises RuntimeError with a clear message on 401 Unauthorized.
+    """
     from huggingface_hub import snapshot_download
     from httpx import HTTPStatusError
 
+    last_exc = None
     for attempt in range(1, attempts + 1):
         try:
             snapshot_download(
@@ -64,18 +75,15 @@ def _snapshot_download_with_token(repo_id, local_dir, token=None, attempts=3):
                     "This repository requires authentication. Provide a valid Hugging Face token\n"
                     "via the environment variable HUGGINGFACE_HUB_TOKEN or HF_TOKEN before running setup."
                 ) from exc
-            if attempt < attempts:
-                time.sleep(2)
-                continue
-            raise
-        except Exception:
-            if attempt < attempts:
-                time.sleep(2)
-                continue
-            raise
+            last_exc = exc
+        except Exception as exc:
+            last_exc = exc
+        # backoff
+        time.sleep(2)
+    raise RuntimeError(f"Failed to download snapshot after {attempts} attempts: {last_exc}")
 
 
-def setup(python_exe, ext_dir, gpu_sm):
+def setup(python_exe: str, ext_dir: str, gpu_sm: int):
     ext_dir = Path(ext_dir)
     venv = ext_dir / "venv"
 
@@ -84,17 +92,18 @@ def setup(python_exe, ext_dir, gpu_sm):
 
     venv_python = python_exe_in_venv(venv)
 
-    print("[setup] Installing build/runtime prerequisites (pip, setuptools, wheel)...")
-    pip(venv, "install", "--upgrade", "pip", "setuptools", "wheel")
+    print("[setup] Ensuring pip/setuptools/wheel are up-to-date in venv...")
+    # Use python -m pip to avoid pip.exe self-upgrade issues on Windows
+    run_venv_pip(venv_python, "install", "--upgrade", "pip", "setuptools", "wheel")
 
     # Install huggingface_hub first (used for snapshot_download)
     print("[setup] Installing huggingface_hub into venv (required for snapshot_download)...")
-    pip(venv, "install", "--upgrade", "huggingface_hub>=0.16.4")
+    run_venv_pip(venv_python, "install", "--upgrade", "huggingface_hub>=0.16.4")
 
     # Install core runtime packages
     print("[setup] Installing core runtime dependencies into venv...")
-    # Keep versions flexible but modern; adjust if you need pinned versions
-    pip(venv, "install", "--upgrade",
+    # Keep versions flexible; pin if you need reproducible installs
+    core_pkgs = [
         "diffusers>=0.27.0",
         "transformers>=4.39.0",
         "accelerate",
@@ -102,7 +111,8 @@ def setup(python_exe, ext_dir, gpu_sm):
         "Pillow",
         "numpy",
         "tqdm",
-    )
+    ]
+    run_venv_pip(venv_python, "install", "--upgrade", *core_pkgs)
 
     # Optionally pre-download the HF repo during setup if token is available.
     # This speeds first-run but is not required; generator will also download on demand.
@@ -117,31 +127,39 @@ def setup(python_exe, ext_dir, gpu_sm):
             model_dir = ext_dir / "model"
             if model_dir.exists():
                 # merge by copying files (best-effort)
+                import shutil
+
                 for src in tmp_dir.iterdir():
                     dest = model_dir / src.name
                     if not dest.exists():
                         try:
                             if src.is_dir():
-                                import shutil
                                 shutil.copytree(src, dest)
                             else:
-                                src.replace(dest)
+                                shutil.copy2(src, dest)
                         except Exception:
+                            # ignore individual copy errors
                             pass
             else:
                 try:
                     tmp_dir.replace(model_dir)
                 except Exception:
-                    # fallback: leave in tmp_dir; generator will snapshot_download again
-                    pass
+                    # fallback: try copytree
+                    try:
+                        import shutil
+
+                        shutil.copytree(tmp_dir, model_dir)
+                    except Exception:
+                        pass
             print("[setup] Pre-download complete.")
         except Exception as exc:
+            # If pre-download fails, do not abort the whole setup; generator will attempt download at runtime.
             print("[setup] Pre-download failed: %s" % exc)
             print("[setup] Continuing setup; generator will attempt download at runtime.")
     else:
         print("[setup] No HF token found in environment; skipping pre-download. Provide HUGGINGFACE_HUB_TOKEN to pre-download during setup.")
 
-    print("[setup] Done. Venv ready at: %s" % venv)
+    print("[setup] Done. venv ready at: %s" % venv)
 
 
 if __name__ == "__main__":
