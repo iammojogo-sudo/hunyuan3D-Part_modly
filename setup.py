@@ -8,6 +8,7 @@ Behavior:
 - Upgrades pip/setuptools/wheel inside the venv.
 - Installs huggingface_hub into the venv BEFORE calling snapshot_download.
 - Calls snapshot_download by importing and invoking the function via `python -c` (avoids `-m` entrypoint issues).
+- Supports GPU-aware PyTorch selection (gpu_sm) if needed; conservative defaults used.
 - Retries network operations with backoff.
 - Writes a small marker file for idempotency and prints clear logs for Modly UI.
 
@@ -31,6 +32,7 @@ from typing import Optional
 # ---------- Configuration ----------
 EXT_ID = "hunyuan_t2i_turbo_modly"
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
+# file expected somewhere in the HF repo to validate download
 DOWNLOAD_CHECK = "config.json"
 DEPS_MARKER = ".deps_installed_v1"
 RETRY_ATTEMPTS = 3
