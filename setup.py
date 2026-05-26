@@ -1,8 +1,7 @@
 """
 Modly extension setup script.
 
-Creates the extension venv and installs runtime packages. Keeps behavior minimal
-so Modly can install the extension without manual steps.
+Creates the extension venv and installs runtime packages.
 
 Called by Modly at install time:
     python setup.py <json_args>
@@ -25,9 +24,6 @@ IS_WIN = platform.system() == "Windows"
 
 
 def run_venv_pip(venv_python: Path, *pip_args, check=True):
-    """
-    Run the venv Python with -m pip so pip upgrades/installations are robust on Windows.
-    """
     cmd = [str(venv_python), "-m", "pip"] + list(pip_args)
     subprocess.run(cmd, check=check)
 
@@ -45,66 +41,50 @@ def _get_hf_token() -> Optional[str]:
 
 
 def _resolve_models_dir() -> Path:
-    """
-    Resolve the shared models directory. Prefer MODELS_DIR env var (set by Modly).
-    Fallback to a safe user-home location: ~/ModlyData/models
-    """
     env = os.environ.get("MODELS_DIR")
     if env:
         return Path(env).expanduser().resolve()
     return Path.home() / "ModlyData" / "models"
 
 
-def _snapshot_download_with_token(repo_id: str, local_dir: str, token: Optional[str], attempts: int = 3):
+def _torch_index_url(gpu_sm: int) -> str:
     """
-    Use huggingface_hub.snapshot_download with retries and explicit token passing.
-    Raises RuntimeError with a clear message on 401 Unauthorized.
+    Return the correct PyTorch wheel index URL for the detected GPU.
+    gpu_sm is the CUDA compute capability as an integer (e.g. 89 for SM 8.9).
+    SM >= 80 (Ampere / Ada / Hopper) -> CUDA 12.1
+    SM  < 80 (Turing / Volta / older) -> CUDA 11.8
     """
-    from huggingface_hub import snapshot_download
-    from httpx import HTTPStatusError
-
-    last_exc = None
-    for attempt in range(1, attempts + 1):
-        try:
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=local_dir,
-                local_dir_use_symlinks=False,
-                use_auth_token=token,
-            )
-            return
-        except HTTPStatusError as exc:
-            status = getattr(exc.response, "status_code", None)
-            if status == 401:
-                raise RuntimeError(
-                    "Hugging Face returned 401 Unauthorized while downloading model.\n"
-                    "This repository requires authentication. Provide a valid Hugging Face token\n"
-                    "via the environment variable HUGGINGFACE_HUB_TOKEN or HF_TOKEN before running setup."
-                ) from exc
-            last_exc = exc
-        except Exception as exc:
-            last_exc = exc
-        # backoff
-        time.sleep(2)
-    raise RuntimeError(f"Failed to download snapshot after {attempts} attempts: {last_exc}")
+    if gpu_sm >= 80:
+        return "https://download.pytorch.org/whl/cu121"
+    return "https://download.pytorch.org/whl/cu118"
 
 
 def setup(python_exe: str, ext_dir: str, gpu_sm: int):
     ext_dir = Path(ext_dir)
-    venv = ext_dir / "venv"
+    venv    = ext_dir / "venv"
 
-    print("[setup] Creating venv at %s ..." % venv)
+    print("[setup] Creating venv at {} ...".format(venv))
     subprocess.run([str(python_exe), "-m", "venv", str(venv)], check=True)
 
     venv_python = python_exe_in_venv(venv)
 
-    print("[setup] Ensuring pip/setuptools/wheel are up-to-date in venv...")
+    print("[setup] Upgrading pip / setuptools / wheel ...")
     run_venv_pip(venv_python, "install", "--upgrade", "pip", "setuptools", "wheel")
 
-    print("[setup] Installing huggingface_hub into venv (required for snapshot_download)...")
+    torch_index = _torch_index_url(gpu_sm)
+    print("[setup] Installing PyTorch (index: {}) ...".format(torch_index))
+    run_venv_pip(
+        venv_python,
+        "install",
+        "torch",
+        "torchvision",
+        "--index-url", torch_index,
+    )
+
+    print("[setup] Installing huggingface_hub ...")
     run_venv_pip(venv_python, "install", "--upgrade", "huggingface_hub>=0.16.4")
 
-    print("[setup] Installing core runtime dependencies into venv...")
+    print("[setup] Installing core runtime dependencies ...")
     core_pkgs = [
         "diffusers>=0.27.0",
         "transformers>=4.39.0",
@@ -116,7 +96,7 @@ def setup(python_exe: str, ext_dir: str, gpu_sm: int):
     ]
     run_venv_pip(venv_python, "install", "--upgrade", *core_pkgs)
 
-    print("[setup] Done. venv ready at: %s" % venv)
+    print("[setup] Done. venv ready at: {}".format(venv))
 
 
 if __name__ == "__main__":
