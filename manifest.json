@@ -20,6 +20,7 @@
     "script": "setup.py",
     "entrypoint": "uninstall"
   },
+  "generator_class": "models.hunyuan_t2i_turbo.generator.Generator",
   "nodes": [
     {
       "id": "hunyuan_t2i_turbo",
