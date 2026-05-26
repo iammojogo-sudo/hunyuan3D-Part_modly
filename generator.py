@@ -1,18 +1,16 @@
 """
 Hunyuan T2I Turbo generator for Modly.
 
-This module exposes:
- - HunyuanT2IGenerator (BaseGenerator subclass) used by Modly for generation.
- - A module-level function `hf_download(repo_id: str, model_id: str) -> dict`
-   which Modly's PythonBridge can call when the user presses the Download button.
-   The function downloads the HF repo into the shared models directory and
-   returns a dict with success/path/message for Modly to display.
+Single-file replacement that:
+ - Exposes top-level download entrypoints: hf_download, download_model, download
+ - Writes a timestamped marker file into the extension folder when invoked
+ - Downloads the HF repo into Modly's shared models directory (MODELS_DIR or ~/ModlyData/models)
+ - Loads the Diffusers pipeline from the shared models directory for generation
 
 Notes:
- - The generator and hf_download both use MODELS_DIR env var when present,
-   otherwise fallback to ~/ModlyData/models.
- - For gated repos, set HUGGINGFACE_HUB_TOKEN (or HF_TOKEN / HUGGINGFACE_TOKEN)
-   in the extension process environment (Modly should inject this).
+ - No additional files required.
+ - For gated repos, Modly must inject HUGGINGFACE_HUB_TOKEN / HF_TOKEN / HUGGINGFACE_TOKEN
+   into the extension process environment so snapshot_download can authenticate.
 """
 import os
 import sys
@@ -52,56 +50,107 @@ def _repo_target_dir(repo_id: str) -> Path:
     return models_dir / safe_name
 
 
-def hf_download(repo_id: str, model_id: Optional[str] = None) -> dict:
+def _write_invocation_marker(ext_dir: Path, repo_id: str) -> Path:
     """
-    Module-level download function intended to be called by Modly's PythonBridge
-    when the user presses the Download button.
+    Write a small marker file into the extension directory so we can confirm
+    the download entrypoint was invoked by Modly.
+    """
+    ts = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    marker_name = f"hf_download_invoked_{ts}_{uuid.uuid4().hex[:8]}.txt"
+    marker_path = ext_dir / marker_name
+    try:
+        marker_path.write_text(f"invoked: {time.asctime()}\nrepo_id: {repo_id}\n", encoding="utf-8")
+    except Exception:
+        # best-effort; do not fail the download just because marker couldn't be written
+        pass
+    return marker_path
 
-    Args:
-        repo_id: Hugging Face repo id (e.g., "TencentARC/HunyuanDiT-Turbo")
-        model_id: optional model id string (unused here but provided by Modly)
 
-    Returns:
-        dict: { "success": bool, "path": str or None, "message": str }
+def _snapshot_download(repo_id: str, target_dir: str, token: Optional[str]):
+    """
+    Wrapper around huggingface_hub.snapshot_download with retries and clear 401 handling.
     """
     from huggingface_hub import snapshot_download
     from httpx import HTTPStatusError
-
-    repo = repo_id or DEFAULT_HF_REPO
-    target_dir = _repo_target_dir(repo)
-    token = _get_hf_token()
-
-    target_dir.parent.mkdir(parents=True, exist_ok=True)
 
     last_exc = None
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
         try:
             snapshot_download(
-                repo_id=repo,
-                local_dir=str(target_dir),
+                repo_id=repo_id,
+                local_dir=target_dir,
                 local_dir_use_symlinks=False,
                 use_auth_token=token,
             )
-            return {"success": True, "path": str(target_dir), "message": "Download complete"}
+            return
         except HTTPStatusError as exc:
             status = getattr(exc.response, "status_code", None)
             if status == 401:
-                return {
-                    "success": False,
-                    "path": None,
-                    "message": (
-                        "401 Unauthorized: This Hugging Face repository requires authentication. "
-                        "Provide a valid Hugging Face token via HUGGINGFACE_HUB_TOKEN or HF_TOKEN."
-                    ),
-                }
+                raise RuntimeError(
+                    "Hugging Face returned 401 Unauthorized while downloading model.\n"
+                    "This repository requires authentication. Provide a valid Hugging Face token\n"
+                    "via the environment variable HUGGINGFACE_HUB_TOKEN or HF_TOKEN."
+                ) from exc
             last_exc = exc
         except Exception as exc:
             last_exc = exc
+        # backoff
         time.sleep(2)
+    raise RuntimeError(f"Failed to download snapshot after {_DOWNLOAD_ATTEMPTS} attempts: {last_exc}")
 
-    return {"success": False, "path": None, "message": f"Download failed: {last_exc}"}
+
+def _perform_download(repo_id: str, model_id: Optional[str] = None) -> dict:
+    """
+    Core download logic used by all top-level entrypoints.
+    Returns a dict: {success: bool, path: str|None, message: str}
+    """
+    try:
+        ext_dir = Path(__file__).parent.resolve()
+    except Exception:
+        ext_dir = Path.cwd()
+
+    # Write marker immediately so we can see invocation even if download fails
+    marker = _write_invocation_marker(ext_dir, repo_id)
+    print(f"[generator.py] hf_download invoked; marker written: {marker}", file=sys.stderr)
+
+    token = _get_hf_token()
+    target_dir = _repo_target_dir(repo_id)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        _snapshot_download(repo_id, str(target_dir), token)
+        msg = f"Download complete: {target_dir}"
+        print(f"[generator.py] {msg}", file=sys.stderr)
+        return {"success": True, "path": str(target_dir), "message": msg}
+    except Exception as exc:
+        err = str(exc)
+        print(f"[generator.py] Download error: {err}", file=sys.stderr)
+        return {"success": False, "path": None, "message": err}
 
 
+# --- Top-level entrypoints Modly might call ---------------------------------
+def hf_download(repo_id: str, model_id: Optional[str] = None) -> dict:
+    """
+    Primary entrypoint expected by Modly's /model/hf-download route.
+    """
+    return _perform_download(repo_id or DEFAULT_HF_REPO, model_id)
+
+
+def download_model(repo_id: str, model_id: Optional[str] = None) -> dict:
+    """
+    Alias entrypoint in case Modly maps to a different function name.
+    """
+    return _perform_download(repo_id or DEFAULT_HF_REPO, model_id)
+
+
+def download(repo_id: str, model_id: Optional[str] = None) -> dict:
+    """
+    Another alias for compatibility.
+    """
+    return _perform_download(repo_id or DEFAULT_HF_REPO, model_id)
+
+
+# --- Generator class (unchanged behavior, uses same shared models dir) ------
 class HunyuanT2IGenerator(BaseGenerator):
     MODEL_ID = "hunyuan_t2i_turbo"
     DISPLAY_NAME = "Hunyuan T2I Turbo"
@@ -109,18 +158,11 @@ class HunyuanT2IGenerator(BaseGenerator):
     MODEL_VARIANT = "t2i-turbo"
 
     def is_downloaded(self) -> bool:
-        """
-        Check whether the model is present in the shared models directory.
-        We look for a minimal marker file (model_index.json) inside the repo subfolder.
-        """
         repo_dir = _repo_target_dir(self.hf_repo or DEFAULT_HF_REPO)
         marker = repo_dir / "model_index.json"
         return marker.exists()
 
     def _download_weights(self):
-        """
-        Download the HF repo into the shared models directory.
-        """
         from huggingface_hub import snapshot_download
         from httpx import HTTPStatusError
 
@@ -214,15 +256,6 @@ class HunyuanT2IGenerator(BaseGenerator):
                 raise RuntimeError("Generation cancelled")
 
     def generate(self, prompt_bytes, params, progress_cb=None, cancel_event=None):
-        """
-        prompt_bytes: bytes or str containing the text prompt
-        params: dict with optional keys:
-            - num_inference_steps (int)
-            - seed (int)
-            - height (int)
-            - width (int)
-        Returns: path to generated PNG
-        """
         import torch
 
         prompt = ""
@@ -241,7 +274,6 @@ class HunyuanT2IGenerator(BaseGenerator):
         self.load()
         self._check_cancelled(cancel_event)
 
-        # Start smooth progress thread while pipeline runs
         stop_evt = threading.Event()
         progress_thread = None
         if progress_cb:
@@ -270,7 +302,6 @@ class HunyuanT2IGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        # Save output to extension outputs_dir
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.outputs_dir / ("%d_%s.png" % (int(time.time()), uuid.uuid4().hex[:8]))
         image.save(str(out_path))
