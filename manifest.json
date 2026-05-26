@@ -2,19 +2,22 @@
   "id": "hunyuan_t2i_turbo",
   "name": "Hunyuan T2I Turbo",
   "type": "model",
-  "source": "https://huggingface.co/TencentARC/HunyuanDiT-Turbo",
+  "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
   "description": "Text-to-image generation using Hunyuan T2I Turbo.",
   "version": "0.1.0",
   "author": "iammojogo",
   "vram_gb": 6,
-  "tags": ["text-to-image", "diffusion"],
+  "tags": [
+    "text-to-image",
+    "diffusion"
+  ],
   "nodes": [
     {
       "id": "generate",
       "name": "Generate Image",
       "input": "text",
       "output": "image",
-      "hf_repo": "TencentARC/HunyuanDiT-Turbo",
+      "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
       "download_check": "model_index.json",
       "params_schema": [
         {
@@ -33,13 +36,13 @@
           "id": "height",
           "label": "Height",
           "type": "int",
-          "default": 512
+          "default": 1024
         },
         {
           "id": "width",
           "label": "Width",
           "type": "int",
-          "default": 512
+          "default": 1024
         }
       ]
     }
