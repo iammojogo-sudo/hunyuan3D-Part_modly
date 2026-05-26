@@ -1,22 +1,23 @@
 {
   "id": "hunyuan_t2i_turbo_modly",
   "name": "HunyuanDiT Turbo Text to Image",
+  "type": "model",
   "version": "0.1.0",
-  "description": "Standalone Modly extension providing HunyuanDiT-Turbo text-to-image generation.",
+  "description": "HunyuanDiT-Turbo text-to-image generator for Modly.",
   "author": "iammojogo",
-  "license": "MIT",
   "vram_gb": 6,
-  "tags": ["text-to-image","hunyuan","diffusers","t2i"],
+  "tags": ["text-to-image","hunyuan","t2i","turbo"],
   "install": { "script": "setup.py", "entrypoint": "install" },
   "uninstall": { "script": "setup.py", "entrypoint": "uninstall" },
   "generator_class": "Generator",
   "entry": "generator.py",
+  "hf_repo": "TencentARC/HunyuanDiT-Turbo",
+  "download_check": "config.json",
   "nodes": [
     {
       "id": "hunyuan_t2i_turbo",
-      "type": "model",
       "name": "HunyuanDiT Turbo",
-      "description": "Fast Hunyuan text-to-image generator (Turbo).",
+      "type": "model",
       "entry": "generator.py",
       "generator_class": "Generator",
       "hf_repo": "TencentARC/HunyuanDiT-Turbo",
@@ -32,8 +33,7 @@
       ],
       "outputs": [
         { "name": "image", "type": "image", "label": "Generated Image" }
-      ],
-      "ui": { "node": "ui/hunyuan_t2i_turbo/Node.tsx" }
+      ]
     }
   ]
 }
