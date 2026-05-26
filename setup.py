@@ -1,148 +1,120 @@
 # setup.py
+"""
+Install/uninstall entrypoint used by Modly.
+- install() will install Python deps (idempotent marker) and snapshot_download
+  the HF repo into: <extension_root>/models/<manifest_id>/
+- uninstall() will remove that model folder and the deps marker.
+"""
+import json
 import os
 import sys
-import json
 import shutil
 import tempfile
 import subprocess
+from pathlib import Path
 
+# Configuration (keep in sync with manifest.json id)
 EXT_ID = "hunyuan_t2i_turbo_modly"
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
 DOWNLOAD_CHECK = "config.json"
 DEPS_MARKER = ".deps_installed_v1"
 
-def log(msg: str):
-    print(f"[{EXT_ID} setup] {msg}", flush=True)
+def _root() -> Path:
+    return Path(__file__).parent.resolve()
 
-def _sanitize_repo_name(repo_id: str) -> str:
-    return repo_id.replace("/", "__")
+def _models_dir() -> Path:
+    d = _root() / "models" / EXT_ID
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-def _extension_root() -> str:
-    return os.path.dirname(__file__)
+def _marker_path() -> Path:
+    return _root() / DEPS_MARKER
 
-def _models_root() -> str:
-    root = _extension_root()
-    models_dir = os.path.join(root, "models")
-    os.makedirs(models_dir, exist_ok=True)
-    return models_dir
-
-def _final_model_dir() -> str:
-    return os.path.join(_models_root(), _sanitize_repo_name(HF_REPO))
-
-def _marker_path() -> str:
-    return os.path.join(_extension_root(), DEPS_MARKER)
-
-def _verify_downloaded_model(path: str) -> bool:
-    for root, _, files in os.walk(path):
-        if DOWNLOAD_CHECK in files:
+def _verify_downloaded_model(path: Path) -> bool:
+    # Look for the download_check file anywhere under the model dir
+    for p in path.rglob("*"):
+        if p.is_file() and p.name == DOWNLOAD_CHECK:
             return True
     return False
 
 def _pip_install(packages):
     cmd = [sys.executable, "-m", "pip", "install", "--upgrade"] + packages
-    log("Installing Python packages: " + " ".join(packages))
     subprocess.check_call(cmd)
 
 def install():
-    """
-    Full install: installs Python deps and downloads model weights into
-    extension/models/<sanitized_repo>. Idempotent.
-    """
-    root = _extension_root()
-    final_dir = _final_model_dir()
+    root = _root()
+    model_dir = _models_dir()
     marker = _marker_path()
 
-    # 1) Install dependencies (only if marker missing)
-    if not os.path.exists(marker):
-        log("Dependencies not found. Installing required Python packages now.")
+    # 1) Install deps once
+    if not marker.exists():
+        print(f"[{EXT_ID}] Installing Python dependencies...", flush=True)
         try:
             _pip_install([
                 "huggingface_hub>=0.16.4",
                 "diffusers>=0.27.0",
                 "transformers>=4.39.0",
                 "accelerate",
-                "safetensors",
-                "torch"
+                "safetensors"
             ])
         except subprocess.CalledProcessError as e:
-            log(f"pip install failed: {e}")
+            print(f"[{EXT_ID}] pip install failed: {e}", flush=True)
             raise
-
-        try:
-            with open(marker, "w", encoding="utf-8") as f:
-                json.dump({"installed_by": EXT_ID, "python": sys.executable}, f)
-            log(f"Dependencies installed. Marker created at {marker}")
-        except Exception as e:
-            log(f"Failed to write deps marker: {e}")
-            raise
+        # create marker
+        marker.write_text(json.dumps({"installed_by": EXT_ID, "python": sys.executable}), encoding="utf-8")
+        print(f"[{EXT_ID}] Dependencies installed; marker created.", flush=True)
     else:
-        log("Dependencies already installed; skipping pip install.")
+        print(f"[{EXT_ID}] Dependencies marker found; skipping pip install.", flush=True)
 
-    # 2) Download model weights if not present or incomplete
-    if os.path.exists(final_dir) and _verify_downloaded_model(final_dir):
-        log(f"Model already present at {final_dir}; skipping download.")
+    # 2) Download HF repo into models/<ext_id> (idempotent)
+    if model_dir.exists() and _verify_downloaded_model(model_dir):
+        print(f"[{EXT_ID}] Model already present at {model_dir}; skipping download.", flush=True)
         return
 
-    tmp_dir = tempfile.mkdtemp(prefix="hf_download_")
+    tmp = Path(tempfile.mkdtemp(prefix=f"{EXT_ID}_hf_"))
     try:
-        log(f"Downloading Hugging Face repo {HF_REPO} into temporary directory...")
+        print(f"[{EXT_ID}] Downloading {HF_REPO} into temporary dir {tmp} ...", flush=True)
         subprocess.check_call([
             sys.executable, "-m", "huggingface_hub.snapshot_download",
             "--repo_id", HF_REPO,
-            "--local_dir", tmp_dir,
+            "--local_dir", str(tmp),
             "--local_dir_use_symlinks", "False"
         ])
+        if not _verify_downloaded_model(tmp):
+            print(f"[{EXT_ID}] Warning: {DOWNLOAD_CHECK} not found in downloaded repo. Proceeding.", flush=True)
 
-        if not _verify_downloaded_model(tmp_dir):
-            log(f"Warning: {DOWNLOAD_CHECK} not found in downloaded repo. Proceeding but verify contents.")
-
-        if os.path.exists(final_dir):
-            log(f"Removing existing model directory at {final_dir}")
-            shutil.rmtree(final_dir, ignore_errors=True)
-
-        log(f"Moving downloaded model into place at {final_dir}")
-        shutil.move(tmp_dir, final_dir)
-        log("Model download and installation complete.")
-
+        if model_dir.exists():
+            shutil.rmtree(model_dir, ignore_errors=True)
+        shutil.move(str(tmp), str(model_dir))
+        print(f"[{EXT_ID}] Model moved into place: {model_dir}", flush=True)
     except subprocess.CalledProcessError as e:
-        log(f"Error during model download: {e}")
-        if os.path.exists(tmp_dir):
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise
-    except Exception as e:
-        log(f"Unexpected error during download: {e}")
-        if os.path.exists(tmp_dir):
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        print(f"[{EXT_ID}] Error during snapshot_download: {e}", flush=True)
         raise
     finally:
-        if os.path.exists(tmp_dir):
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
 
 def uninstall():
-    """
-    Remove model folder and dependency marker. Do not attempt to uninstall pip packages.
-    """
-    final_dir = _final_model_dir()
+    model_dir = _root() / "models" / EXT_ID
     marker = _marker_path()
 
-    if os.path.exists(final_dir):
-        log(f"Removing model directory {final_dir}")
-        shutil.rmtree(final_dir, ignore_errors=True)
+    if model_dir.exists():
+        print(f"[{EXT_ID}] Removing model directory {model_dir}", flush=True)
+        shutil.rmtree(model_dir, ignore_errors=True)
     else:
-        log("No model directory found to remove.")
+        print(f"[{EXT_ID}] No model directory to remove.", flush=True)
 
-    if os.path.exists(marker):
+    if marker.exists():
         try:
-            os.remove(marker)
-            log(f"Removed dependency marker {marker}")
+            marker.unlink()
+            print(f"[{EXT_ID}] Removed deps marker {marker}", flush=True)
         except Exception as e:
-            log(f"Failed to remove marker: {e}")
-
-    log("Uninstall complete.")
+            print(f"[{EXT_ID}] Failed to remove marker: {e}", flush=True)
 
 if __name__ == "__main__":
-    # Allow Modly to call install/uninstall via script entrypoint
-    if len(sys.argv) >= 2:
+    # Allow Modly to call: python setup.py '{"python_exe":"...","ext_dir":"...","gpu_sm":89}'
+    # or: python setup.py install
+    if len(sys.argv) == 2:
         cmd = sys.argv[1].lower()
         if cmd == "install":
             install()
@@ -150,5 +122,16 @@ if __name__ == "__main__":
             uninstall()
         else:
             print("Usage: python setup.py [install|uninstall]")
+    elif len(sys.argv) == 4:
+        # positional args: python_exe ext_dir gpu_sm  (Modly sometimes calls like this)
+        # We ignore python_exe/gpu_sm here because we run in the extension's Python.
+        install()
+    elif len(sys.argv) == 2 and sys.argv[1].startswith("{"):
+        # JSON arg form
+        try:
+            args = json.loads(sys.argv[1])
+            install()
+        except Exception:
+            print("Invalid JSON args")
     else:
         print("Usage: python setup.py [install|uninstall]")
