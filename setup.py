@@ -1,72 +1,82 @@
 #!/usr/bin/env python3
 """
-setup.py — Install/uninstall entrypoint for HunyuanDiT-Turbo Modly extension.
+Automated install/uninstall entrypoint for HunyuanDiT‑Turbo Modly extension.
 
-Supported invocations:
+Goals:
+- Fully automated: Modly calls this during Install; no manual steps required.
+- Creates a venv inside the extension folder and uses the venv python for all installs and downloads.
+- Upgrades pip/setuptools/wheel inside the venv.
+- Installs huggingface_hub into the venv BEFORE calling snapshot_download.
+- Installs core runtime deps (diffusers, transformers, safetensors, accelerate, Pillow, numpy).
+- Downloads HF repo into models/<ext_id>/ using huggingface_hub.snapshot_download (venv python).
+- Retries network operations a few times with backoff.
+- Writes a small marker file for idempotency and prints clear logs for Modly UI.
+
+Usage (Modly):
   python setup.py '{"python_exe":"<path>","ext_dir":"<path>","gpu_sm":89}'
   python setup.py <python_exe> <ext_dir> <gpu_sm>
   python setup.py install
   python setup.py uninstall
-
-Behavior:
-  - Creates a venv inside the extension folder (ext_dir/venv) using the provided python_exe.
-  - Installs build prerequisites (ninja, setuptools, wheel) into the venv.
-  - Installs PyTorch appropriate for gpu_sm and xformers.
-  - Installs core Python deps (diffusers, transformers, huggingface_hub, safetensors, accelerate, pillow, numpy, etc.)
-  - Downloads the HF repo TencentARC/HunyuanDiT-Turbo into models/<ext_id>/ using huggingface_hub.snapshot_download.
-  - Idempotent where possible and prints progress messages.
 """
-
+from __future__ import annotations
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
 EXT_ID = "hunyuan_t2i_turbo_modly"
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
-DOWNLOAD_CHECK = "config.json"  # file expected somewhere in the HF repo
+DOWNLOAD_CHECK = "config.json"
 DEPS_MARKER = ".deps_installed_v1"
+RETRY_ATTEMPTS = 3
+RETRY_BACKOFF = 4.0  # seconds base
 
 IS_WIN = sys.platform.startswith("win")
 
-def log(msg: str):
+# ---------- Logging helper ----------
+def log(msg: str) -> None:
     print(f"[{EXT_ID}] {msg}", flush=True)
 
-def _root(ext_dir: Optional[str] = None) -> Path:
-    if ext_dir:
-        return Path(ext_dir).resolve()
-    return Path(__file__).parent.resolve()
+# ---------- Path helpers ----------
+def root_path(ext_dir: Optional[str]) -> Path:
+    return Path(ext_dir).resolve() if ext_dir else Path(__file__).parent.resolve()
 
-def _venv_dir(root: Path) -> Path:
+def venv_dir(root: Path) -> Path:
     return root / "venv"
 
-def _venv_python(venv: Path) -> Path:
-    return venv / ("Scripts" if IS_WIN else "bin") / ("python.exe" if IS_WIN else "python")
+def venv_python(venv: Path) -> str:
+    return str(venv / ("Scripts" if IS_WIN else "bin") / ("python.exe" if IS_WIN else "python"))
 
-def _venv_pip(venv: Path) -> Path:
-    return venv / ("Scripts" if IS_WIN else "bin") / ("pip.exe" if IS_WIN else "pip")
+def venv_pip(venv: Path) -> str:
+    return str(venv / ("Scripts" if IS_WIN else "bin") / ("pip.exe" if IS_WIN else "pip"))
 
-def _run(cmd, env=None, cwd: Optional[Path] = None, check=True):
-    log("Running: " + " ".join(map(str, cmd)))
-    return subprocess.run(list(map(str, cmd)), env=env, cwd=(str(cwd) if cwd else None), check=check)
+# ---------- Subprocess wrapper with retry ----------
+def run(cmd, check=True, capture=False, env=None, cwd=None):
+    cmd_list = list(map(str, cmd))
+    log("Running: " + " ".join(cmd_list))
+    return subprocess.run(cmd_list, check=check, capture_output=capture, text=True, env=env, cwd=cwd)
 
-def _create_venv(python_exe: str, venv_dir: Path):
-    if venv_dir.exists():
-        log(f"Venv already exists at {venv_dir}; skipping creation.")
-        return
-    log(f"Creating venv at {venv_dir} using {python_exe}")
-    _run([python_exe, "-m", "venv", str(venv_dir)])
+def run_with_retry(cmd, attempts=RETRY_ATTEMPTS, backoff=RETRY_BACKOFF, **kwargs):
+    last_exc = None
+    for i in range(1, attempts + 1):
+        try:
+            return run(cmd, **kwargs)
+        except subprocess.CalledProcessError as e:
+            last_exc = e
+            log(f"Command failed (attempt {i}/{attempts}): {e}")
+            if i < attempts:
+                sleep = backoff * i
+                log(f"Retrying in {sleep:.0f}s...")
+                time.sleep(sleep)
+    raise last_exc
 
-def _pip_install_in_venv(venv: Path, packages):
-    pip_exe = str(_venv_pip(venv))
-    cmd = [pip_exe, "install", "--upgrade"] + packages
-    _run(cmd)
-
-def _verify_downloaded_model(path: Path) -> bool:
+# ---------- Verification helpers ----------
+def verify_model_downloaded(path: Path) -> bool:
     if not path.exists():
         return False
     for p in path.rglob("*"):
@@ -74,109 +84,106 @@ def _verify_downloaded_model(path: Path) -> bool:
             return True
     return False
 
-def _snapshot_download(tmp_dir: Path):
-    # Use the venv python's -m huggingface_hub.snapshot_download when called from install flow
-    # This helper is used by install() below where we call the venv python explicitly.
-    raise RuntimeError("_snapshot_download should not be called directly")
+# ---------- Core steps ----------
+def create_venv(python_exe: str, venv_path: Path) -> None:
+    if venv_path.exists():
+        log(f"Venv already exists at {venv_path}; skipping creation.")
+        return
+    log(f"Creating venv at {venv_path} using {python_exe}")
+    run_with_retry([python_exe, "-m", "venv", str(venv_path)])
 
-def install(python_exe: str, ext_dir: str, gpu_sm: int):
-    root = _root(ext_dir)
-    venv_dir = _venv_dir(root)
-    model_dir = root / "models" / EXT_ID
-    marker = root / DEPS_MARKER
-
-    # 1) Create venv
-    _create_venv(python_exe, venv_dir)
-    venv_python = str(_venv_python(venv_dir))
-    venv_pip = str(_venv_pip(venv_dir))
-
-    # 2) Install build prerequisites into venv
-    log("Installing build prerequisites (ninja, setuptools, wheel) into venv...")
-    _pip_install_in_venv(venv_dir, ["ninja", "setuptools", "wheel"])
-
-    # 3) Install PyTorch appropriate for gpu_sm
-    # NOTE: adjust versions as needed for your environment. This is conservative and widely compatible.
-    if gpu_sm >= 100:
-        torch_index = "https://download.pytorch.org/whl/cu128"
-        torch_pkgs = ["torch>=2.7.0", "torchvision>=0.22.0", "torchaudio>=2.7.0"]
-        log(f"SM {gpu_sm} -> PyTorch 2.7+CUDA12.8")
-    elif gpu_sm >= 70:
-        torch_index = "https://download.pytorch.org/whl/cu124"
-        torch_pkgs = ["torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0"]
-        log(f"SM {gpu_sm} -> PyTorch 2.6.0+CUDA12.4")
-    else:
-        torch_index = "https://download.pytorch.org/whl/cu118"
-        torch_pkgs = ["torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1"]
-        log(f"SM {gpu_sm} (legacy) -> PyTorch 2.5.1+CUDA11.8")
-
-    log("Installing PyTorch into venv (this may take a while)...")
+def upgrade_pip_and_tools(vp: str) -> None:
     try:
-        # pip accepts --index-url as a separate arg; pass it at the end
-        _run([venv_pip, "install", "--upgrade"] + torch_pkgs + ["--index-url", torch_index])
-    except subprocess.CalledProcessError as e:
-        log(f"PyTorch install failed: {e}. You may need to install a compatible wheel manually.")
-        raise
-
-    # 4) Install xformers (best-effort)
-    log("Installing xformers (best-effort)...")
-    try:
-        if gpu_sm >= 70:
-            _run([venv_pip, "install", "xformers==0.0.29.post3", "--index-url", torch_index])
-        else:
-            _run([venv_pip, "install", "xformers==0.0.28.post2", "--index-url", "https://download.pytorch.org/whl/cu118"])
+        run_with_retry([vp, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
     except subprocess.CalledProcessError:
-        log("xformers install failed — continuing without it (non-fatal).")
+        log("Warning: failed to upgrade pip/setuptools/wheel; continuing.")
 
-    # 5) Install core Python deps (diffusers, transformers, huggingface_hub, safetensors, accelerate, pillow, numpy, etc.)
-    core_deps = [
-        "huggingface_hub>=0.16.4",
+def pip_install(venv: Path, packages: list[str]) -> None:
+    pip = venv_pip(venv)
+    cmd = [pip, "install", "--upgrade"] + packages
+    run_with_retry(cmd)
+
+def ensure_hf_and_core(venv: Path) -> None:
+    # Install huggingface_hub first (critical)
+    log("Installing huggingface_hub into venv (required for snapshot_download)...")
+    pip_install(venv, ["huggingface_hub>=0.16.4"])
+    # Install core runtime deps
+    core = [
         "diffusers>=0.27.0",
         "transformers>=4.39.0",
         "accelerate",
         "safetensors",
         "Pillow",
         "numpy",
-        "scipy",
         "tqdm",
     ]
-    log("Installing core Python dependencies into venv...")
-    _pip_install_in_venv(venv_dir, core_deps)
+    log("Installing core runtime dependencies into venv...")
+    pip_install(venv, core)
 
-    # 6) Create models dir and download HF repo if needed
-    model_dir_parent = root / "models"
+    # Verification: pip show and import check
+    try:
+        out = run([venv_pip(venv), "show", "huggingface_hub"], capture=True)
+        log("huggingface_hub installed:\n" + (out.stdout or out.stderr))
+    except Exception:
+        log("Warning: pip show huggingface_hub failed.")
+
+    try:
+        out = run([venv_python(venv), "-c", "import huggingface_hub; print('huggingface_hub', huggingface_hub.__version__)"], capture=True)
+        log("huggingface_hub import check:\n" + (out.stdout or out.stderr))
+    except Exception as e:
+        log(f"ERROR: huggingface_hub import check failed: {e}")
+        raise
+
+def download_hf_repo(venv: Path, root: Path) -> None:
+    model_dir = root / "models" / EXT_ID
+    model_dir_parent = model_dir.parent
     model_dir_parent.mkdir(parents=True, exist_ok=True)
 
-    if model_dir.exists() and _verify_downloaded_model(model_dir):
+    if model_dir.exists() and verify_model_downloaded(model_dir):
         log(f"Model already present at {model_dir}; skipping download.")
-    else:
-        tmp = Path(tempfile.mkdtemp(prefix=f"{EXT_ID}_hf_"))
-        try:
-            log(f"Downloading Hugging Face repo {HF_REPO} into temporary dir {tmp} ...")
-            # Use the venv python to run snapshot_download so it uses the venv's huggingface_hub
-            _run([venv_python, "-m", "huggingface_hub.snapshot_download",
-                  "--repo_id", HF_REPO,
-                  "--local_dir", str(tmp),
-                  "--local_dir_use_symlinks", "False"])
-            if not _verify_downloaded_model(tmp):
-                log(f"Warning: {DOWNLOAD_CHECK} not found in downloaded repo. Proceeding but verify contents.")
-            if model_dir.exists():
-                shutil.rmtree(model_dir, ignore_errors=True)
-            shutil.move(str(tmp), str(model_dir))
-            log(f"Model downloaded and moved into place: {model_dir}")
-        except subprocess.CalledProcessError as e:
-            log(f"Error during snapshot_download: {e}")
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-            raise
-        finally:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
+        return
 
-    # 7) Create deps marker for idempotency
+    tmp = Path(tempfile.mkdtemp(prefix=f"{EXT_ID}_hf_"))
     try:
-        marker = root / DEPS_MARKER
+        log(f"Downloading Hugging Face repo {HF_REPO} into temporary dir {tmp} ...")
+        run_with_retry([
+            venv_python(venv), "-m", "huggingface_hub.snapshot_download",
+            "--repo_id", HF_REPO,
+            "--local_dir", str(tmp),
+            "--local_dir_use_symlinks", "False"
+        ], attempts=RETRY_ATTEMPTS)
+        if not verify_model_downloaded(tmp):
+            log(f"Warning: {DOWNLOAD_CHECK} not found in downloaded repo. Proceeding but verify contents.")
+        if model_dir.exists():
+            shutil.rmtree(model_dir, ignore_errors=True)
+        shutil.move(str(tmp), str(model_dir))
+        log(f"Model downloaded and moved into place: {model_dir}")
+    except subprocess.CalledProcessError as e:
+        log(f"Error during snapshot_download: {e}")
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+
+# ---------- Public install/uninstall ----------
+def install(python_exe: str, ext_dir: str, gpu_sm: int) -> None:
+    root = root_path(ext_dir)
+    venv = venv_dir(root)
+    marker = root / DEPS_MARKER
+
+    create_venv(python_exe, venv)
+    vp = venv_python(venv)
+
+    upgrade_pip_and_tools(vp)
+    ensure_hf_and_core(venv)
+    download_hf_repo(venv, root)
+
+    # Write marker for idempotency
+    try:
         if not marker.exists():
-            marker.write_text(json.dumps({"installed_by": EXT_ID, "python": venv_python}), encoding="utf-8")
+            marker.write_text(json.dumps({"installed_by": EXT_ID, "python": vp}), encoding="utf-8")
             log(f"Created deps marker at {marker}")
         else:
             log("Deps marker already present.")
@@ -185,11 +192,11 @@ def install(python_exe: str, ext_dir: str, gpu_sm: int):
 
     log("Install complete.")
 
-def uninstall(ext_dir: str):
-    root = _root(ext_dir)
+def uninstall(ext_dir: str) -> None:
+    root = root_path(ext_dir)
+    venv = venv_dir(root)
     model_dir = root / "models" / EXT_ID
     marker = root / DEPS_MARKER
-    venv_dir = _venv_dir(root)
 
     if model_dir.exists():
         log(f"Removing model directory {model_dir}")
@@ -197,23 +204,24 @@ def uninstall(ext_dir: str):
     else:
         log("No model directory found to remove.")
 
-    if venv_dir.exists():
-        log(f"Removing venv directory {venv_dir}")
-        shutil.rmtree(venv_dir, ignore_errors=True)
+    if venv.exists():
+        log(f"Removing venv directory {venv}")
+        shutil.rmtree(venv, ignore_errors=True)
     else:
         log("No venv directory found to remove.")
 
     if marker.exists():
         try:
             marker.unlink()
-            log(f"Removed deps marker {marker}")
+            log(f"Removed dependency marker {marker}")
         except Exception as e:
             log(f"Failed to remove marker: {e}")
 
     log("Uninstall complete.")
 
-def main():
-    # Support JSON arg form
+# ---------- CLI entry ----------
+def main() -> None:
+    # JSON arg form
     if len(sys.argv) == 2 and sys.argv[1].startswith("{"):
         try:
             args = json.loads(sys.argv[1])
