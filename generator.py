@@ -1,24 +1,20 @@
 """
-Hunyuan T2I Turbo generator for Modly.
+Hunyuan T2I Turbo generator for Modly (download target: shared models dir).
 
-This generator:
- - Ensures model files are present (downloads via huggingface_hub.snapshot_download)
-   and supports authenticated downloads using an HF token from environment.
- - Loads a Diffusers-style pipeline from the local model directory.
- - Exposes generate(prompt_bytes, params, progress_cb, cancel_event) returning a PNG path.
+This generator ensures model files are present in Modly's shared models directory
+and will download them there when the user clicks the purple Download button.
 
-Notes:
- - Provide a Hugging Face token via HUGGINGFACE_HUB_TOKEN or HF_TOKEN if the repo is gated.
- - The generator expects a BaseGenerator implementation in services.generators.base.
+Key points:
+ - Uses MODELS_DIR env var when available; otherwise falls back to ~/ModlyData/models.
+ - Downloads to a subfolder named after the repo (slashes replaced with underscores).
+ - Supports HF auth tokens via HUGGINGFACE_HUB_TOKEN / HF_TOKEN / HUGGINGFACE_TOKEN.
+ - Loads pipeline from the shared models directory (so Modly's UI and runtime share the same files).
 """
-import base64
-import io
 import os
 import sys
-import tempfile
-import threading
 import time
 import uuid
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -26,10 +22,9 @@ from PIL import Image
 
 from services.generators.base import BaseGenerator, smooth_progress
 
-
-_HF_REPO = "TencentARC/HunyuanDiT-Turbo"
+# Default repo id (change if you want a different default)
+DEFAULT_HF_REPO = "TencentARC/HunyuanDiT-Turbo"
 _DOWNLOAD_ATTEMPTS = 3
-_GLB_MAGIC = b"glTF"
 
 
 def _get_hf_token() -> Optional[str]:
@@ -40,6 +35,19 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
+def _resolve_models_dir() -> Path:
+    env = os.environ.get("MODELS_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.home() / "ModlyData" / "models"
+
+
+def _repo_target_dir(repo_id: str) -> Path:
+    models_dir = _resolve_models_dir()
+    safe_name = repo_id.replace("/", "_")
+    return models_dir / safe_name
+
+
 class HunyuanT2IGenerator(BaseGenerator):
     MODEL_ID = "hunyuan_t2i_turbo"
     DISPLAY_NAME = "Hunyuan T2I Turbo"
@@ -47,22 +55,32 @@ class HunyuanT2IGenerator(BaseGenerator):
     MODEL_VARIANT = "t2i-turbo"
 
     def is_downloaded(self) -> bool:
-        # Check for a minimal marker file in model_dir
-        marker = self.model_dir / "model_index.json"
+        """
+        Check whether the model is present in the shared models directory.
+        We look for a minimal marker file (model_index.json) inside the repo subfolder.
+        """
+        repo_dir = _repo_target_dir(self.hf_repo or DEFAULT_HF_REPO)
+        marker = repo_dir / "model_index.json"
         return marker.exists()
 
     def _download_weights(self):
+        """
+        Download the HF repo into the shared models directory.
+        This is the same location the setup.py download action writes to.
+        """
         from huggingface_hub import snapshot_download
         from httpx import HTTPStatusError
 
-        repo_id = self.hf_repo or _HF_REPO
+        repo_id = self.hf_repo or DEFAULT_HF_REPO
+        target_dir = _repo_target_dir(repo_id)
         token = _get_hf_token()
+
         last_exc = None
         for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
             try:
                 snapshot_download(
                     repo_id=repo_id,
-                    local_dir=str(self.model_dir),
+                    local_dir=str(target_dir),
                     local_dir_use_symlinks=False,
                     use_auth_token=token,
                 )
@@ -79,7 +97,7 @@ class HunyuanT2IGenerator(BaseGenerator):
             except Exception as exc:
                 last_exc = exc
             time.sleep(2)
-        raise RuntimeError("Failed to download model after %d attempts: %s" % (_DOWNLOAD_ATTEMPTS, last_exc))
+        raise RuntimeError(f"Failed to download model after {_DOWNLOAD_ATTEMPTS} attempts: {last_exc}")
 
     def _ensure_model_present(self):
         if not self.is_downloaded():
@@ -91,7 +109,6 @@ class HunyuanT2IGenerator(BaseGenerator):
 
         self._ensure_model_present()
 
-        # Import and load pipeline
         try:
             from diffusers import DiffusionPipeline
             import torch
@@ -101,16 +118,17 @@ class HunyuanT2IGenerator(BaseGenerator):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.float16 if device == "cuda" else torch.float32
 
-        # Load pipeline from local model_dir
+        repo_dir = _repo_target_dir(self.hf_repo or DEFAULT_HF_REPO)
+
         try:
             self._pipe = DiffusionPipeline.from_pretrained(
-                str(self.model_dir),
+                str(repo_dir),
                 local_files_only=True,
                 torch_dtype=dtype,
             )
             self._pipe.to(device)
         except Exception as exc:
-            raise RuntimeError("Failed to load pipeline from %s: %s" % (self.model_dir, exc)) from exc
+            raise RuntimeError("Failed to load pipeline from %s: %s" % (repo_dir, exc)) from exc
 
         self._model_loaded = True
         self._device = device
@@ -184,7 +202,6 @@ class HunyuanT2IGenerator(BaseGenerator):
         try:
             generator = torch.Generator(device=self._device).manual_seed(seed) if hasattr(torch, "Generator") else None
             with torch.no_grad():
-                # Many diffusers pipelines accept height/width via kwargs; pass if supported.
                 result = self._pipe(
                     prompt,
                     num_inference_steps=steps,
@@ -200,7 +217,7 @@ class HunyuanT2IGenerator(BaseGenerator):
 
         self._check_cancelled(cancel_event)
 
-        # Save output
+        # Save output to extension outputs_dir
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.outputs_dir / ("%d_%s.png" % (int(time.time()), uuid.uuid4().hex[:8]))
         image.save(str(out_path))
