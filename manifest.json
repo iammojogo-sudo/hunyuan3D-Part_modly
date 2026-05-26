@@ -5,7 +5,7 @@
   "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
   "description": "Text-to-image generation using Hunyuan T2I Turbo.",
   "version": "0.1.0",
-  "author": "yourname",
+  "author": "iammojogo",
   "vram_gb": 6,
   "tags": [
     "text-to-image",
