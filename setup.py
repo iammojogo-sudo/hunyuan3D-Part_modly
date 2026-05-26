@@ -2,17 +2,16 @@
 """
 Automated install/uninstall entrypoint for HunyuanDiT‑Turbo Modly extension.
 
-Goals:
+Behavior:
 - Fully automated: Modly calls this during Install; no manual steps required.
 - Creates a venv inside the extension folder and uses the venv python for all installs and downloads.
 - Upgrades pip/setuptools/wheel inside the venv.
 - Installs huggingface_hub into the venv BEFORE calling snapshot_download.
-- Installs core runtime deps (diffusers, transformers, safetensors, accelerate, Pillow, numpy).
-- Downloads HF repo into models/<ext_id>/ using huggingface_hub.snapshot_download (venv python).
-- Retries network operations a few times with backoff.
+- Calls snapshot_download by importing and invoking the function via `python -c` (avoids `-m` entrypoint issues).
+- Retries network operations with backoff.
 - Writes a small marker file for idempotency and prints clear logs for Modly UI.
 
-Usage (Modly):
+Supported invocations:
   python setup.py '{"python_exe":"<path>","ext_dir":"<path>","gpu_sm":89}'
   python setup.py <python_exe> <ext_dir> <gpu_sm>
   python setup.py install
@@ -29,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# ---------- Configuration ----------
 EXT_ID = "hunyuan_t2i_turbo_modly"
 HF_REPO = "TencentARC/HunyuanDiT-Turbo"
 DOWNLOAD_CHECK = "config.json"
@@ -38,7 +38,7 @@ RETRY_BACKOFF = 4.0  # seconds base
 
 IS_WIN = sys.platform.startswith("win")
 
-# ---------- Logging helper ----------
+# ---------- Logging ----------
 def log(msg: str) -> None:
     print(f"[{EXT_ID}] {msg}", flush=True)
 
@@ -55,7 +55,7 @@ def venv_python(venv: Path) -> str:
 def venv_pip(venv: Path) -> str:
     return str(venv / ("Scripts" if IS_WIN else "bin") / ("pip.exe" if IS_WIN else "pip"))
 
-# ---------- Subprocess wrapper with retry ----------
+# ---------- Subprocess helpers ----------
 def run(cmd, check=True, capture=False, env=None, cwd=None):
     cmd_list = list(map(str, cmd))
     log("Running: " + " ".join(cmd_list))
@@ -134,35 +134,49 @@ def ensure_hf_and_core(venv: Path) -> None:
         log(f"ERROR: huggingface_hub import check failed: {e}")
         raise
 
-def download_hf_repo(venv: Path, root: Path) -> None:
-    model_dir = root / "models" / EXT_ID
-    model_dir_parent = model_dir.parent
-    model_dir_parent.mkdir(parents=True, exist_ok=True)
-
-    if model_dir.exists() and verify_model_downloaded(model_dir):
-        log(f"Model already present at {model_dir}; skipping download.")
-        return
+def download_hf_repo_using_function(venv_python: str, hf_repo: str, dest_parent: Path, download_check: str, attempts=RETRY_ATTEMPTS, backoff=RETRY_BACKOFF) -> Path:
+    """
+    Use the venv python to import and call snapshot_download directly via -c.
+    This avoids `python -m huggingface_hub.snapshot_download` which is not a runnable module on some installs.
+    Returns the final model directory path.
+    """
+    dest_parent.mkdir(parents=True, exist_ok=True)
+    final_dir = dest_parent / hf_repo.replace("/", "__")
+    if final_dir.exists() and any(p.name == download_check for p in final_dir.rglob("*") if p.is_file()):
+        log(f"Model already present at {final_dir}; skipping download.")
+        return final_dir
 
     tmp = Path(tempfile.mkdtemp(prefix=f"{EXT_ID}_hf_"))
     try:
-        log(f"Downloading Hugging Face repo {HF_REPO} into temporary dir {tmp} ...")
-        run_with_retry([
-            venv_python(venv), "-m", "huggingface_hub.snapshot_download",
-            "--repo_id", HF_REPO,
-            "--local_dir", str(tmp),
-            "--local_dir_use_symlinks", "False"
-        ], attempts=RETRY_ATTEMPTS)
-        if not verify_model_downloaded(tmp):
-            log(f"Warning: {DOWNLOAD_CHECK} not found in downloaded repo. Proceeding but verify contents.")
-        if model_dir.exists():
-            shutil.rmtree(model_dir, ignore_errors=True)
-        shutil.move(str(tmp), str(model_dir))
-        log(f"Model downloaded and moved into place: {model_dir}")
-    except subprocess.CalledProcessError as e:
-        log(f"Error during snapshot_download: {e}")
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise
+        # Build inline python command that calls snapshot_download
+        cmd_template = (
+            "from huggingface_hub import snapshot_download; "
+            "snapshot_download(repo_id={repo!r}, local_dir={local_dir!r}, local_dir_use_symlinks=False)"
+        ).format(repo=hf_repo, local_dir=str(tmp))
+
+        last_exc = None
+        for i in range(1, attempts + 1):
+            try:
+                log(f"Downloading HF repo {hf_repo} into temporary dir {tmp} (attempt {i}/{attempts})...")
+                run([venv_python, "-c", cmd_template], check=True)
+                # verify presence of download_check
+                if not any(p.name == download_check for p in tmp.rglob("*") if p.is_file()):
+                    log(f"Warning: {download_check} not found in downloaded repo (attempt {i}).")
+                # move into place
+                if final_dir.exists():
+                    shutil.rmtree(final_dir, ignore_errors=True)
+                shutil.move(str(tmp), str(final_dir))
+                log(f"Model downloaded and moved into place: {final_dir}")
+                return final_dir
+            except subprocess.CalledProcessError as e:
+                last_exc = e
+                log(f"snapshot_download failed (attempt {i}/{attempts}): {e}")
+                if i < attempts:
+                    sleep = backoff * i
+                    log(f"Retrying in {sleep:.0f}s...")
+                    time.sleep(sleep)
+        # all attempts failed
+        raise last_exc
     finally:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -172,13 +186,20 @@ def install(python_exe: str, ext_dir: str, gpu_sm: int) -> None:
     root = root_path(ext_dir)
     venv = venv_dir(root)
     marker = root / DEPS_MARKER
+    models_parent = root / "models"
 
     create_venv(python_exe, venv)
     vp = venv_python(venv)
 
     upgrade_pip_and_tools(vp)
     ensure_hf_and_core(venv)
-    download_hf_repo(venv, root)
+
+    # Download HF repo into models/<sanitized_repo>
+    try:
+        download_hf_repo_using_function(vp, HF_REPO, models_parent, DOWNLOAD_CHECK)
+    except subprocess.CalledProcessError as e:
+        log(f"Error during snapshot_download: {e}")
+        raise
 
     # Write marker for idempotency
     try:
@@ -221,46 +242,55 @@ def uninstall(ext_dir: str) -> None:
 
 # ---------- CLI entry ----------
 def main() -> None:
-    # JSON arg form
-    if len(sys.argv) == 2 and sys.argv[1].startswith("{"):
-        try:
-            args = json.loads(sys.argv[1])
+    try:
+        # JSON arg form
+        if len(sys.argv) == 2 and sys.argv[1].startswith("{"):
+            try:
+                args = json.loads(sys.argv[1])
+            except Exception as exc:
+                log(f"Invalid JSON args: {exc}")
+                sys.exit(2)
             python_exe = args.get("python_exe", sys.executable)
             ext_dir = args.get("ext_dir", str(Path(__file__).parent))
             gpu_sm = int(args.get("gpu_sm", 70))
             install(python_exe, ext_dir, gpu_sm)
             return
-        except Exception as exc:
-            log(f"Invalid JSON args: {exc}")
-            sys.exit(2)
 
-    # Positional form: python setup.py <python_exe> <ext_dir> <gpu_sm>
-    if len(sys.argv) >= 4:
-        python_exe = sys.argv[1]
-        ext_dir = sys.argv[2]
-        try:
-            gpu_sm = int(sys.argv[3])
-        except Exception:
-            gpu_sm = 70
-        install(python_exe, ext_dir, gpu_sm)
-        return
-
-    # Simple commands
-    if len(sys.argv) == 2:
-        cmd = sys.argv[1].lower()
-        if cmd == "install":
-            install(sys.executable, str(Path(__file__).parent), 70)
-            return
-        if cmd == "uninstall":
-            uninstall(str(Path(__file__).parent))
+        # Positional form: python setup.py <python_exe> <ext_dir> <gpu_sm>
+        if len(sys.argv) >= 4:
+            python_exe = sys.argv[1]
+            ext_dir = sys.argv[2]
+            try:
+                gpu_sm = int(sys.argv[3])
+            except Exception:
+                gpu_sm = 70
+            install(python_exe, ext_dir, gpu_sm)
             return
 
-    print("Usage:")
-    print("  python setup.py '{\"python_exe\":\"...\",\"ext_dir\":\"...\",\"gpu_sm\":89}'")
-    print("  python setup.py <python_exe> <ext_dir> <gpu_sm>")
-    print("  python setup.py install")
-    print("  python setup.py uninstall")
-    sys.exit(1)
+        # Simple commands
+        if len(sys.argv) == 2:
+            cmd = sys.argv[1].lower()
+            if cmd == "install":
+                install(sys.executable, str(Path(__file__).parent), 70)
+                return
+            if cmd == "uninstall":
+                uninstall(str(Path(__file__).parent))
+                return
+
+        print("Usage:")
+        print("  python setup.py '{\"python_exe\":\"...\",\"ext_dir\":\"...\",\"gpu_sm\":89}'")
+        print("  python setup.py <python_exe> <ext_dir> <gpu_sm>")
+        print("  python setup.py install")
+        print("  python setup.py uninstall")
+        sys.exit(1)
+
+    except subprocess.CalledProcessError as e:
+        # Clear, non-ambiguous exit for Modly to show failure reason
+        log(f"Setup failed: {e}")
+        sys.exit(2)
+    except Exception as e:
+        log(f"Unexpected error: {e}")
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()
