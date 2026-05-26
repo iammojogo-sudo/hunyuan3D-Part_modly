@@ -20,6 +20,7 @@
       "name": "HunyuanDiT Turbo",
       "description": "Fast Hunyuan text-to-image generator (Turbo).",
       "entry": "models/hunyuan_t2i_turbo/generator.py",
+      "generator_class": "models.hunyuan_t2i_turbo.generator.Generator",
       "inputs": [
         { "name": "prompt", "type": "string", "default": "", "label": "Prompt" },
         { "name": "negative_prompt", "type": "string", "default": "", "label": "Negative Prompt" },
@@ -36,5 +37,6 @@
         "node": "ui/hunyuan_t2i_turbo/Node.tsx"
       }
     }
+
   ]
 }
