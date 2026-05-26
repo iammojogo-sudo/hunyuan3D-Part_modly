@@ -1,26 +1,16 @@
 """
-Modly extension setup script (download-action enabled).
+Modly extension setup script.
 
-This script creates the extension venv and installs runtime packages.
-It also supports an explicit "download" action to fetch model weights into
-Modly's shared models directory (used by the purple Download button).
+Creates the extension venv and installs runtime packages. Keeps behavior minimal
+so Modly can install the extension without manual steps.
 
-Usage (called by Modly):
+Called by Modly at install time:
     python setup.py <json_args>
 
 json_args keys:
     python_exe  - path to Modly's embedded Python
     ext_dir     - absolute path to this extension directory
     gpu_sm      - GPU compute capability as integer (e.g. 89 for RTX 4050)
-    action      - optional string: "install" (default) or "download"
-
-Alternatively, call:
-    python setup.py download <repo_id>
-
-Environment:
-    MODELS_DIR - optional path to Modly's models directory (preferred).
-                 If not set, fallback to: ~/ModlyData/models
-    HUGGINGFACE_HUB_TOKEN / HF_TOKEN / HUGGINGFACE_TOKEN - optional HF token for gated repos.
 """
 import json
 import os
@@ -32,9 +22,6 @@ from pathlib import Path
 from typing import Optional
 
 IS_WIN = platform.system() == "Windows"
-
-# Default HF repo used for optional pre-download. Change if you want a different repo.
-DEFAULT_HF_REPO = "TencentARC/HunyuanDiT-Turbo"
 
 
 def run_venv_pip(venv_python: Path, *pip_args, check=True):
@@ -65,7 +52,6 @@ def _resolve_models_dir() -> Path:
     env = os.environ.get("MODELS_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    # fallback
     return Path.home() / "ModlyData" / "models"
 
 
@@ -93,7 +79,7 @@ def _snapshot_download_with_token(repo_id: str, local_dir: str, token: Optional[
                 raise RuntimeError(
                     "Hugging Face returned 401 Unauthorized while downloading model.\n"
                     "This repository requires authentication. Provide a valid Hugging Face token\n"
-                    "via the environment variable HUGGINGFACE_HUB_TOKEN or HF_TOKEN and retry."
+                    "via the environment variable HUGGINGFACE_HUB_TOKEN or HF_TOKEN before running setup."
                 ) from exc
             last_exc = exc
         except Exception as exc:
@@ -103,11 +89,7 @@ def _snapshot_download_with_token(repo_id: str, local_dir: str, token: Optional[
     raise RuntimeError(f"Failed to download snapshot after {attempts} attempts: {last_exc}")
 
 
-def setup_install(python_exe: str, ext_dir: str, gpu_sm: int):
-    """
-    Create venv and install runtime packages. Does not force model download unless
-    an HF token is present and pre-download is desired.
-    """
+def setup(python_exe: str, ext_dir: str, gpu_sm: int):
     ext_dir = Path(ext_dir)
     venv = ext_dir / "venv"
 
@@ -134,68 +116,24 @@ def setup_install(python_exe: str, ext_dir: str, gpu_sm: int):
     ]
     run_venv_pip(venv_python, "install", "--upgrade", *core_pkgs)
 
-    print("[setup] Setup complete. venv ready at: %s" % venv)
-
-
-def setup_download(repo_id: str):
-    """
-    Download the HF repo into the shared models directory.
-    This is the action the Modly 'Download' button should trigger.
-    """
-    models_dir = _resolve_models_dir()
-    models_dir.mkdir(parents=True, exist_ok=True)
-
-    # Place each repo into a subfolder named after the repo id (safe)
-    safe_name = repo_id.replace("/", "_")
-    target_dir = models_dir / safe_name
-
-    token = _get_hf_token()
-    print(f"[setup] Downloading repo '{repo_id}' into models dir: {models_dir} (auth={'yes' if token else 'no'})")
-    try:
-        _snapshot_download_with_token(repo_id, str(target_dir), token=token)
-        print(f"[setup] Download complete: {target_dir}")
-    except Exception as exc:
-        # Raise so Modly can surface the error to the user
-        raise
-
-
-def main_from_json_arg(json_arg: str):
-    """
-    Accept a JSON string argument from Modly with keys:
-      python_exe, ext_dir, gpu_sm, action (optional), repo_id (optional)
-    """
-    args = json.loads(json_arg)
-    python_exe = args.get("python_exe")
-    ext_dir = args.get("ext_dir")
-    gpu_sm = int(args.get("gpu_sm", 0))
-    action = args.get("action", "install")
-    repo_id = args.get("repo_id", DEFAULT_HF_REPO)
-
-    if action == "install":
-        setup_install(python_exe, ext_dir, gpu_sm)
-    elif action == "download":
-        setup_download(repo_id)
-    else:
-        raise RuntimeError(f"Unknown action: {action}")
+    print("[setup] Done. venv ready at: %s" % venv)
 
 
 if __name__ == "__main__":
-    # CLI modes:
-    # 1) python setup.py <json_args>
-    # 2) python setup.py download <repo_id>
-    # 3) python setup.py install <python_exe> <ext_dir> <gpu_sm>
-    if len(sys.argv) == 2:
-        # assume JSON arg
-        main_from_json_arg(sys.argv[1])
-    elif len(sys.argv) >= 2 and sys.argv[1] == "download":
-        repo = sys.argv[2] if len(sys.argv) >= 3 else DEFAULT_HF_REPO
-        setup_download(repo)
-    elif len(sys.argv) == 4 and sys.argv[1] == "install":
-        # python setup.py install <python_exe> <ext_dir> <gpu_sm>
-        setup_install(sys.argv[2], sys.argv[3], int(0))
+    if len(sys.argv) >= 4:
+        setup(
+            python_exe=sys.argv[1],
+            ext_dir=sys.argv[2],
+            gpu_sm=int(sys.argv[3]),
+        )
+    elif len(sys.argv) == 2:
+        args = json.loads(sys.argv[1])
+        setup(
+            python_exe=args["python_exe"],
+            ext_dir=args["ext_dir"],
+            gpu_sm=int(args["gpu_sm"]),
+        )
     else:
-        print("Usage:")
-        print("  python setup.py '<json_args>'")
-        print("  python setup.py download <repo_id>")
-        print("  python setup.py install <python_exe> <ext_dir> <gpu_sm>")
+        print("Usage: python setup.py <python_exe> <ext_dir> <gpu_sm>")
+        print('   or: python setup.py \'{"python_exe":"...","ext_dir":"...","gpu_sm":89}\'')
         sys.exit(1)
