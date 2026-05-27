@@ -29,10 +29,12 @@ class HunyuanImage21Generator(BaseGenerator):
     VRAM_GB = 6
 
     # ------------------------------------------------------------------
-    # Download check
+    # Download checks
     # ------------------------------------------------------------------
 
     def is_downloaded(self):
+        if self.download_check:
+            return (self.model_dir / self.download_check).exists()
         checks = ["base/config.json", "vae/config.json"]
         for c in checks:
             if not (self.model_dir / c).exists():
@@ -40,7 +42,7 @@ class HunyuanImage21Generator(BaseGenerator):
         return True
 
     # ------------------------------------------------------------------
-    # Download
+    # Download helpers
     # ------------------------------------------------------------------
 
     def _auto_download(self):
@@ -49,9 +51,15 @@ class HunyuanImage21Generator(BaseGenerator):
     def _download_weights(self):
         from huggingface_hub import snapshot_download
 
-        repo_id = self.hf_repo or _HF_REPO_ID
+        repo_id        = self.hf_repo or _HF_REPO_ID
+        manifest_skips = list(getattr(self, "hf_skip_prefixes", []) or [])
 
-        ignore = ["*.md", "*.txt", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"]
+        ignore = []
+        for pattern in manifest_skips:
+            ignore.append(pattern)
+            if isinstance(pattern, str) and pattern.endswith("/"):
+                ignore.append(pattern + "*")
+        ignore += ["*.md", "*.txt", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"]
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
