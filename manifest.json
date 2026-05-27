@@ -7,7 +7,7 @@
   "entry": "generator.py",
   "generator_class": "HunyuanImage21Generator",
   "author": "iammojogo",
-  "source": "https://github.com/your/repo",
+  "source": "https://github.com/iammojogo-sudo/hunyuan2.1_t2i_modly",
   "description": "Text-to-image generator using Tencent HunyuanImage-2.1.",
   "tags": ["text-to-image", "hunyuan", "t2i"],
   "nodes": [
@@ -16,9 +16,8 @@
       "name": "Generate Image",
       "input": "prompt",
       "output": "image",
-      "model_id": "hunyuan_image_2_1_t2i/generate",
       "hf_repo": "Tencent-Hunyuan/HunyuanImage-2.1",
-      "download_check": ["base/config.json", "base/pytorch_model.safetensors", "vae/config.json"],
+      "download_check": "vae/config.json",
       "params_schema": [
         { "id": "prompt", "label": "Prompt", "type": "string", "required": true },
         { "id": "negative_prompt", "label": "Negative Prompt", "type": "string" },
@@ -28,14 +27,6 @@
         { "id": "guidance_scale", "label": "Guidance Scale", "type": "float", "default": 5.0, "min": 0.0, "max": 20.0 },
         { "id": "seed", "label": "Seed", "type": "int", "default": 0 }
       ]
-    }
-  ],
-  "resources": [
-    {
-      "name": "model",
-      "type": "hf_repo",
-      "repo": "Tencent-Hunyuan/HunyuanImage-2.1",
-      "subfolders": ["base", "refiner", "vae", "text_encoder"]
     }
   ],
   "signature": "REPLACE_WITH_BASE64_SIGNATURE"
