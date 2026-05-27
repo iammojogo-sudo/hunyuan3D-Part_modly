@@ -6,8 +6,8 @@
   "output": "image",
   "entry": "generator.py",
   "generator_class": "HunyuanImage21Generator",
-  "author": "iammojogo",
-  "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
+  "author": "Your Name",
+  "source": "https://github.com/your/repo",
   "description": "Text-to-image generator using Tencent HunyuanImage-2.1 (base).",
   "tags": ["text-to-image", "hunyuan", "t2i"],
   "nodes": [
