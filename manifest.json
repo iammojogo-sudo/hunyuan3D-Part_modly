@@ -8,7 +8,7 @@
   "generator_class": "HunyuanImage21Generator",
   "author": "iammojogo",
   "source": "https://github.com/your/repo",
-  "description": "Text-to-image generator using Tencent HunyuanImage-2.1 (base).",
+  "description": "Text-to-image generator using Tencent HunyuanImage-2.1.",
   "tags": ["text-to-image", "hunyuan", "t2i"],
   "nodes": [
     {
