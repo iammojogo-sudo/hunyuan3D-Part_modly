@@ -1,68 +1,70 @@
 {
-  "id": "hunyuan_t2i_turbo",
-  "name": "Hunyuan T2I Turbo",
-  "type": "model",
-  "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
-  "description": "HunyuanDiT v1.2 distilled text-to-image. Connect a Text node as the input.",
-  "version": "0.1.0",
-  "author": "iammojogo",
-  "generator_class": "HunyuanT2IGenerator",
-  "vram_gb": 6,
-  "tags": ["text-to-image", "diffusion"],
-  "nodes": [
+  "id": "hunyuan_image_2_1",
+  "name": "HunyuanImage-2.1 T2I",
+  "version": "1.0.0",
+  "type": "generator",
+  "entry": "generator.py",
+  "description": "Text-to-image generator using Tencent HunyuanImage-2.1 base model.",
+  "tags": ["text-to-image", "hunyuan", "hunyuanimage-2.1"],
+  "inputs": [
     {
-      "id": "generate",
-      "name": "Generate Image",
-      "type": "process",
-      "entry": "processor.js",
-      "input": "text",
-      "output": "image",
-      "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
-      "download_check": "model_index.json",
-      "params_schema": [
-        {
-          "id": "num_inference_steps",
-          "label": "Steps",
-          "type": "select",
-          "default": 20,
-          "options": [
-            { "value": 10, "label": "Fast (10)" },
-            { "value": 20, "label": "Balanced (20)" },
-            { "value": 30, "label": "Quality (30)" }
-          ]
-        },
-        {
-          "id": "height",
-          "label": "Height",
-          "type": "select",
-          "default": 1024,
-          "options": [
-            { "value": 512,  "label": "512" },
-            { "value": 768,  "label": "768" },
-            { "value": 1024, "label": "1024" }
-          ]
-        },
-        {
-          "id": "width",
-          "label": "Width",
-          "type": "select",
-          "default": 1024,
-          "options": [
-            { "value": 512,  "label": "512" },
-            { "value": 768,  "label": "768" },
-            { "value": 1024, "label": "1024" }
-          ]
-        },
-        {
-          "id": "seed",
-          "label": "Seed",
-          "type": "int",
-          "default": -1,
-          "min": -1,
-          "max": 2147483647,
-          "tooltip": "-1 for random"
-        }
-      ]
+      "name": "prompt",
+      "type": "string",
+      "label": "Prompt",
+      "required": true
+    },
+    {
+      "name": "negative_prompt",
+      "type": "string",
+      "label": "Negative Prompt",
+      "required": false
+    },
+    {
+      "name": "width",
+      "type": "int",
+      "label": "Width",
+      "default": 1024,
+      "min": 256,
+      "max": 1536
+    },
+    {
+      "name": "height",
+      "type": "int",
+      "label": "Height",
+      "default": 1024,
+      "min": 256,
+      "max": 1536
+    },
+    {
+      "name": "steps",
+      "type": "int",
+      "label": "Steps",
+      "default": 30,
+      "min": 4,
+      "max": 80
+    },
+    {
+      "name": "guidance_scale",
+      "type": "float",
+      "label": "Guidance Scale",
+      "default": 5.0,
+      "min": 0.0,
+      "max": 20.0
+    },
+    {
+      "name": "seed",
+      "type": "int",
+      "label": "Seed",
+      "default": 0,
+      "min": 0,
+      "max": 2147483647
+    }
+  ],
+  "outputs": [
+    {
+      "name": "image",
+      "type": "image",
+      "label": "Generated Image"
     }
   ]
 }
