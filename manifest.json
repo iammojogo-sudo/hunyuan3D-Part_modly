@@ -1,19 +1,73 @@
 {
   "id": "hunyuan_t2i_turbo",
   "name": "Hunyuan T2I Turbo",
+  "type": "model",
   "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
   "description": "Text-to-image generation using HunyuanDiT v1.2 Turbo. Type a prompt and generate images locally on your GPU.",
   "version": "0.1.0",
   "author": "yourname",
   "generator_class": "HunyuanT2IGenerator",
+  "vram_gb": 6,
   "tags": ["text-to-image", "diffusion"],
-  "models": [
+  "nodes": [
     {
-      "id": "hunyuan_t2i_turbo",
-      "name": "HunyuanDiT v1.2 Turbo",
+      "id": "generate",
+      "name": "Generate Image",
+      "output": "image",
       "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
       "download_check": "model_index.json",
-      "description": "HunyuanDiT v1.2 distilled model — fast text-to-image generation"
+      "params_schema": [
+        {
+          "id": "prompt",
+          "label": "Prompt",
+          "type": "string",
+          "default": "a beautiful landscape",
+          "tooltip": "Describe the image you want to generate."
+        },
+        {
+          "id": "num_inference_steps",
+          "label": "Quality",
+          "type": "select",
+          "default": 20,
+          "tooltip": "More steps = higher quality, slower generation.",
+          "options": [
+            { "value": 10, "label": "Fast (10 steps)" },
+            { "value": 20, "label": "Balanced (20 steps)" },
+            { "value": 30, "label": "High (30 steps)" }
+          ]
+        },
+        {
+          "id": "height",
+          "label": "Height",
+          "type": "select",
+          "default": 1024,
+          "options": [
+            { "value": 512,  "label": "512 px" },
+            { "value": 768,  "label": "768 px" },
+            { "value": 1024, "label": "1024 px" }
+          ]
+        },
+        {
+          "id": "width",
+          "label": "Width",
+          "type": "select",
+          "default": 1024,
+          "options": [
+            { "value": 512,  "label": "512 px" },
+            { "value": 768,  "label": "768 px" },
+            { "value": 1024, "label": "1024 px" }
+          ]
+        },
+        {
+          "id": "seed",
+          "label": "Seed  (-1 = random)",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 2147483647,
+          "tooltip": "Set a fixed seed for reproducible results."
+        }
+      ]
     }
   ]
 }
