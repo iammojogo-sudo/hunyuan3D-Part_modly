@@ -3,22 +3,23 @@ generator.py
 
 Modly-compatible generator for HunyuanImage-2.1 text-to-image.
 
-Behavior:
-- Prefer local model folder under Modly models dir: ~/.modly/models/<model_id> (or MODLY_MODELS_DIR env).
-- If local files are missing, automatically download the HF repo into that model folder using huggingface_hub.snapshot_download.
-- Load a diffusers pipeline (HunyuanImagePipeline) from the local folder if present, otherwise from HF.
+Key behaviors:
+- Uses Modly local models dir: ~/.modly/models/<model_id> by default.
+- Implements is_downloaded() and download_weights() using huggingface_hub.snapshot_download.
+- Loads diffusers pipeline from local model folder with local_files_only=True.
 - Exposes HunyuanImage21Generator with load(), unload(), generate(params, progress_cb, cancel_event).
 """
 
 import os
 import random
+import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable, Tuple
 
 import torch
 from PIL import Image
 
-# Attempt to import diffusers pipeline class; if unavailable, the code will raise a clear error.
+# Try to import pipeline class; if unavailable, raise clear error at load time.
 try:
     from diffusers import HunyuanImagePipeline  # type: ignore
     _HAS_PIPELINE = True
@@ -51,6 +52,9 @@ class HunyuanImage21Generator:
         self.pipe = None
         self._loaded_from = None
 
+    # -------------------------
+    # Model path helpers
+    # -------------------------
     def _resolve_models_dir(self) -> Path:
         # Priority: explicit model_dir -> MODLY_MODELS_DIR env -> default ~/.modly/models
         if self.model_dir:
@@ -64,85 +68,148 @@ class HunyuanImage21Generator:
         base = self._resolve_models_dir()
         return base / self.NODE_MODEL_ID
 
-    def _check_downloaded(self, target: Path) -> bool:
-        # Files to check that indicate a successful download
+    def _downloaded_root_from_snapshot(self, snapshot_root: Path) -> Path:
+        """
+        snapshot_download may place files under snapshot_root/<repo_id> or directly under snapshot_root.
+        Normalize to the directory that contains the expected subfolders (base/, vae/, etc).
+        """
+        # If snapshot_root contains subfolder with repo name, prefer that
+        repo_name = self.HF_REPO.split("/")[-1]
+        candidate = snapshot_root / repo_name
+        if candidate.exists() and any(candidate.iterdir()):
+            return candidate
+        # Otherwise, if snapshot_root itself looks like the repo root, return it
+        if any((snapshot_root / p).exists() for p in ("base", "vae", "text_encoder")):
+            return snapshot_root
+        # Otherwise return snapshot_root and let load fail with clear error
+        return snapshot_root
+
+    # -------------------------
+    # Download helpers
+    # -------------------------
+    def is_downloaded(self) -> bool:
+        """
+        Return True if the model files exist in the Modly models folder for this node.
+        Uses the same file checks as the manifest's download_check.
+        """
+        target = self._target_model_path()
         checks = ["base/config.json", "base/pytorch_model.safetensors", "vae/config.json"]
         for c in checks:
             if not (target / c).exists():
                 return False
         return True
 
-    def _download_to_local(self, progress_cb: ProgressCallback = None) -> None:
+    def download_weights(self, progress_cb: ProgressCallback = None) -> Tuple[bool, str]:
+        """
+        Download HF repo into Modly models folder for this node using snapshot_download.
+        Returns (success, message).
+        """
         if not _HAS_HF_HUB:
-            raise RuntimeError("huggingface_hub is not installed in the extension environment; run setup to install it.")
+            return False, "huggingface_hub not installed in extension environment"
+
         target = self._target_model_path()
         target.mkdir(parents=True, exist_ok=True)
-        # snapshot_download will populate the cache_dir; we use repo_id and let it place files under cache_dir/repo_id
-        # To ensure files end up under target, we call snapshot_download with repo_id and allow_patterns=None and set cache_dir to target.
+
+        # snapshot_download will populate cache_dir; we pass target as cache_dir.
+        # snapshot_download may create a subfolder named after the repo; normalize after download.
         try:
             if progress_cb:
-                progress_cb(0.0, "downloading model from Hugging Face")
-            snapshot_download(repo_id=self.HF_REPO, cache_dir=str(target), repo_type="model")
+                progress_cb(0.0, "starting download from Hugging Face")
+            # Use repo_id and cache_dir=target. repo_type default is "model".
+            snapshot_dir = snapshot_download(repo_id=self.HF_REPO, cache_dir=str(target), repo_type="model")
+            # snapshot_dir is the path where HF placed the files (string)
+            snapshot_path = Path(snapshot_dir)
+            root = self._downloaded_root_from_snapshot(snapshot_path)
+            # If snapshot placed files under target/<repo_name>, move them up to target root for consistent layout
+            if root != target:
+                # move contents of root into target
+                for item in root.iterdir():
+                    dest = target / item.name
+                    if dest.exists():
+                        # remove existing to avoid partial conflicts
+                        if dest.is_dir():
+                            shutil.rmtree(dest)
+                        else:
+                            dest.unlink()
+                    if item.is_dir():
+                        shutil.move(str(item), str(dest))
+                    else:
+                        shutil.move(str(item), str(dest))
+                # if root is a subfolder under target, remove it if empty
+                try:
+                    if root.exists() and root != target:
+                        shutil.rmtree(root)
+                except Exception:
+                    pass
+
             if progress_cb:
                 progress_cb(1.0, "download complete")
+            # verify
+            if self.is_downloaded():
+                return True, f"Downloaded to {str(target)}"
+            else:
+                return False, f"Downloaded but required files not found under {str(target)}"
         except Exception as e:
-            raise RuntimeError(f"Failed to download HF repo {self.HF_REPO}: {e}")
+            return False, f"Download failed: {e}"
 
+    # -------------------------
+    # Load / Unload / Generate
+    # -------------------------
     def load(self, progress_cb: ProgressCallback = None) -> None:
+        """
+        Load the diffusers pipeline. Prefer local model folder; if missing, attempt to download automatically.
+        """
         if self.pipe is not None:
             return
 
         target = self._target_model_path()
 
-        # If target missing or incomplete, attempt to download automatically
-        if not self._check_downloaded(target):
-            try:
-                self._download_to_local(progress_cb=progress_cb)
-            except Exception as e:
-                # If automatic download fails, fall back to remote load attempt (requires internet)
+        # If not downloaded, attempt to download (Modly's UI also triggers download; this is a fallback)
+        if not self.is_downloaded():
+            ok, msg = self.download_weights(progress_cb=progress_cb)
+            if not ok:
+                # If download failed, try remote load as last resort (requires internet)
                 if progress_cb:
-                    progress_cb(0.0, f"local download failed: {e}; attempting remote load")
-                # remote load will be attempted below
+                    progress_cb(0.0, f"local download failed: {msg}; attempting remote load")
+            else:
+                if progress_cb:
+                    progress_cb(0.0, f"model ready at {str(target)}")
 
-        # Try to load from local target first
+        # Try to load from local target first (local_files_only=True)
         if target.exists() and any(target.iterdir()):
+            if not _HAS_PIPELINE:
+                raise RuntimeError("diffusers HunyuanImagePipeline not available; install compatible diffusers")
             try:
-                if _HAS_PIPELINE and HunyuanImagePipeline is not None:
-                    self.pipe = HunyuanImagePipeline.from_pretrained(
-                        str(target),
-                        torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                    ).to(self.device)
-                    self._loaded_from = f"local:{target}"
-                else:
-                    raise RuntimeError("HunyuanImagePipeline not available in diffusers; install a compatible diffusers version.")
+                self.pipe = HunyuanImagePipeline.from_pretrained(
+                    str(target),
+                    local_files_only=True,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                ).to(self.device)
+                self._loaded_from = f"local:{str(target)}"
             except Exception as e_local:
-                # If local load fails, try remote HF load
+                # fallback to HF remote
                 try:
-                    if _HAS_PIPELINE and HunyuanImagePipeline is not None:
-                        self.pipe = HunyuanImagePipeline.from_pretrained(
-                            self.HF_REPO,
-                            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                        ).to(self.device)
-                        self._loaded_from = f"hf:{self.HF_REPO}"
-                    else:
-                        raise RuntimeError("HunyuanImagePipeline not available in diffusers; install a compatible diffusers version.")
-                except Exception as e_remote:
-                    raise RuntimeError(f"Failed to load pipeline locally ({e_local}) and remotely ({e_remote})")
-        else:
-            # No local files; try remote HF load
-            try:
-                if _HAS_PIPELINE and HunyuanImagePipeline is not None:
                     self.pipe = HunyuanImagePipeline.from_pretrained(
                         self.HF_REPO,
                         torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
                     ).to(self.device)
                     self._loaded_from = f"hf:{self.HF_REPO}"
-                else:
-                    raise RuntimeError("HunyuanImagePipeline not available in diffusers; install a compatible diffusers version.")
+                except Exception as e_remote:
+                    raise RuntimeError(f"Failed to load pipeline locally ({e_local}) and remotely ({e_remote})")
+        else:
+            # No local files; try remote HF load
+            if not _HAS_PIPELINE:
+                raise RuntimeError("diffusers HunyuanImagePipeline not available; install compatible diffusers")
+            try:
+                self.pipe = HunyuanImagePipeline.from_pretrained(
+                    self.HF_REPO,
+                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                ).to(self.device)
+                self._loaded_from = f"hf:{self.HF_REPO}"
             except Exception as e:
                 raise RuntimeError(f"Failed to load pipeline from HF repo {self.HF_REPO}: {e}")
 
-        # Optional performance tweaks
+        # optional perf tweaks
         try:
             if self.device == "cuda":
                 self.pipe.enable_xformers_memory_efficient_attention()
@@ -165,6 +232,9 @@ class HunyuanImage21Generator:
         progress_cb: ProgressCallback = None,
         cancel_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
+        """
+        Generate an image and return {"image_path": ..., "meta": {...}}
+        """
         self.load(progress_cb=progress_cb)
         if self.pipe is None:
             raise RuntimeError("pipeline not loaded")
