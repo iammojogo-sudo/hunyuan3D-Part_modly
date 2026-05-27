@@ -1,3 +1,10 @@
+"""
+setup.py
+
+Installs a venv and required packages for the extension.
+This mirrors the example extension's setup pattern and ensures huggingface_hub and diffusers are present.
+"""
+
 import json
 import platform
 import subprocess
@@ -7,35 +14,41 @@ from pathlib import Path
 IS_WIN = platform.system() == "Windows"
 
 
-def pip(venv_py, *args):
-    subprocess.run([str(venv_py), "-m", "pip"] + list(args), check=True)
+def pip(venv, *args):
+    pip_exe = venv / ("Scripts/pip.exe" if IS_WIN else "bin/pip")
+    subprocess.run([str(pip_exe)] + list(args), check=True)
 
 
-def venv_python(venv):
+def python_exe_in_venv(venv):
     return venv / ("Scripts/python.exe" if IS_WIN else "bin/python")
 
 
 def torch_index(gpu_sm):
-    # cu121 for Ampere+ (SM >= 80), cu118 for older GPUs
-    if gpu_sm >= 80:
-        return "https://download.pytorch.org/whl/cu121"
+    if gpu_sm >= 100:
+        return "https://download.pytorch.org/whl/cu128"
+    if gpu_sm >= 70:
+        return "https://download.pytorch.org/whl/cu124"
     return "https://download.pytorch.org/whl/cu118"
 
 
 def setup(python_exe, ext_dir, gpu_sm):
     ext_dir = Path(ext_dir)
     venv = ext_dir / "venv"
-
+    print("[setup] Creating venv at %s ..." % venv)
     subprocess.run([str(python_exe), "-m", "venv", str(venv)], check=True)
-    py = venv_python(venv)
+    venv_python = python_exe_in_venv(venv)
 
-    pip(py, "install", "--upgrade", "pip", "setuptools", "wheel")
+    pip(venv, "install", "--upgrade", "pip", "setuptools", "wheel")
 
     idx = torch_index(gpu_sm)
     print("[setup] torch index:", idx)
-    pip(py, "install", "torch", "torchvision", "--index-url", idx)
+    # Minimal torch install; Modly may already provide torch; keep this flexible
+    pip(venv, "install", "torch", "torchvision", "--index-url", idx)
 
-    pip(py, "install",
+    # Core deps
+    pip(
+        venv,
+        "install",
         "huggingface_hub>=0.16.4",
         "diffusers>=0.30.0",
         "transformers>=4.40.0",
@@ -48,13 +61,13 @@ def setup(python_exe, ext_dir, gpu_sm):
         "tqdm",
     )
 
-    # xformers is optional; try to install but don't fail the setup if it isn't available
+    # Optional xformers
     try:
-        pip(py, "install", "xformers")
+        pip(venv, "install", "xformers")
     except Exception:
         print("[setup] xformers install failed or not available; continuing without it")
 
-    print("[setup] done")
+    print("[setup] done. venv at %s" % venv)
 
 
 if __name__ == "__main__":
