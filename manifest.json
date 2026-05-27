@@ -2,55 +2,41 @@
   "id": "hunyuan_image_2_1_t2i",
   "name": "HunyuanImage 2.1 Text-to-Image",
   "version": "1.0.0",
-  "type": "generator",
+  "type": "model",
+  "output": "image",
   "entry": "generator.py",
   "generator_class": "HunyuanImage21Generator",
-  "description": "Text-to-image generator using Tencent HunyuanImage-2.1.",
-  "params": {
-    "prompt": {
-      "type": "string",
-      "label": "Prompt",
-      "required": true
-    },
-    "negative_prompt": {
-      "type": "string",
-      "label": "Negative Prompt",
-      "required": false
-    },
-    "width": {
-      "type": "int",
-      "label": "Width",
-      "default": 1024,
-      "min": 256,
-      "max": 1536
-    },
-    "height": {
-      "type": "int",
-      "label": "Height",
-      "default": 1024,
-      "min": 256,
-      "max": 1536
-    },
-    "steps": {
-      "type": "int",
-      "label": "Steps",
-      "default": 30,
-      "min": 4,
-      "max": 80
-    },
-    "guidance_scale": {
-      "type": "float",
-      "label": "Guidance Scale",
-      "default": 5.0,
-      "min": 0.0,
-      "max": 20.0
-    },
-    "seed": {
-      "type": "int",
-      "label": "Seed",
-      "default": 0,
-      "min": 0,
-      "max": 2147483647
+  "author": "Your Name",
+  "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
+  "description": "Text-to-image generator using Tencent HunyuanImage-2.1 (base).",
+  "tags": ["text-to-image","hunyuan","t2i"],
+  "nodes": [
+    {
+      "id": "generate",
+      "name": "Generate Image",
+      "input": "prompt",
+      "output": "image",
+      "hf_repo": "Tencent-Hunyuan/HunyuanImage-2.1",
+      "download_check": "base",
+      "hf_skip_prefixes": [],
+      "params_schema": [
+        { "id": "prompt", "label": "Prompt", "type": "string", "required": true },
+        { "id": "negative_prompt", "label": "Negative Prompt", "type": "string" },
+        { "id": "width", "label": "Width", "type": "int", "default": 1024, "min": 256, "max": 1536 },
+        { "id": "height", "label": "Height", "type": "int", "default": 1024, "min": 256, "max": 1536 },
+        { "id": "steps", "label": "Steps", "type": "int", "default": 30, "min": 4, "max": 80 },
+        { "id": "guidance_scale", "label": "Guidance Scale", "type": "float", "default": 5.0, "min": 0.0, "max": 20.0 },
+        { "id": "seed", "label": "Seed", "type": "int", "default": 0 }
+      ]
     }
-  }
+  ],
+  "resources": [
+    {
+      "name": "model",
+      "type": "hf_repo",
+      "repo": "Tencent-Hunyuan/HunyuanImage-2.1",
+      "subfolders": ["base", "refiner", "vae", "text_encoder"]
+    }
+  ],
+  "signature": "REPLACE_WITH_BASE64_SIGNATURE"
 }
