@@ -1,72 +1,19 @@
 {
   "id": "hunyuan_t2i_turbo",
   "name": "Hunyuan T2I Turbo",
-  "type": "model",
   "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
-  "description": "Text-to-image generation using Hunyuan T2I Turbo.",
+  "description": "Text-to-image generation using HunyuanDiT v1.2 Turbo. Type a prompt and generate images locally on your GPU.",
   "version": "0.1.0",
-  "author": "iammojogo",
-  "vram_gb": 6,
-  "tags": [
-    "text-to-image",
-    "diffusion"
-  ],
-  "nodes": [
+  "author": "yourname",
+  "generator_class": "HunyuanT2IGenerator",
+  "tags": ["text-to-image", "diffusion"],
+  "models": [
     {
-      "id": "generate",
-      "name": "Generate Image",
-      "input": "text",
-      "output": "image",
+      "id": "hunyuan_t2i_turbo",
+      "name": "HunyuanDiT v1.2 Turbo",
       "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
       "download_check": "model_index.json",
-      "params_schema": [
-        {
-          "id": "num_inference_steps",
-          "label": "Inference Steps",
-          "type": "int",
-          "default": 20
-        },
-        {
-          "id": "seed",
-          "label": "Seed",
-          "type": "int",
-          "default": 42
-        },
-        {
-          "id": "height",
-          "label": "Height",
-          "type": "int",
-          "default": 1024
-        },
-        {
-          "id": "width",
-          "label": "Width",
-          "type": "int",
-          "default": 1024
-        }
-      ]
-    },
-    {
-      "id": "preview",
-      "name": "Preview Image",
-      "input": "image",
-      "output": "image",
-      "params_schema": []
-    },
-    {
-      "id": "save",
-      "name": "Save Image",
-      "input": "image",
-      "output": "image",
-      "params_schema": [
-        {
-          "id": "format",
-          "label": "Format (PNG / JPG / WEBP)",
-          "type": "string",
-          "default": "PNG"
-        }
-      ]
+      "description": "HunyuanDiT v1.2 distilled model — fast text-to-image generation"
     }
-  ],
-  "generator_class": "HunyuanT2IGenerator"
+  ]
 }
