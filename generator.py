@@ -1,48 +1,72 @@
 import os
 import random
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional, Callable
 
 import torch
 from PIL import Image
 
-# Assumes diffusers has HunyuanImagePipeline for HunyuanImage-2.1
-# If the class name/module differs, just fix the import below.
+# Assumes diffusers exposes HunyuanImagePipeline for HunyuanImage-2.1.
+# If the actual class/module name differs, just fix the import below.
 from diffusers import HunyuanImagePipeline
+
+
+ProgressCallback = Optional[Callable[[float, str], None]]
 
 
 class HunyuanImage21Generator:
     """
-    Modly generator wrapper for Tencent HunyuanImage-2.1 (base-only, text-to-image).
+    Simple text-to-image generator around HunyuanImage-2.1 base model.
+
+    Designed to be called by Modly with a params dict and optional
+    progress / cancel hooks.
     """
 
-    def __init__(self) -> None:
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.pipe = None
+    MODEL_ID = os.environ.get(
+        "HUNYUANIMAGE_21_MODEL_ID",
+        "Tencent-Hunyuan/HunyuanImage-2.1-base",
+    )
 
-    def _load_pipeline(self) -> None:
+    def __init__(self, model_dir: Optional[str] = None, outputs_dir: Optional[str] = None):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.pipe: Optional[HunyuanImagePipeline] = None
+
+        self.model_dir = Path(model_dir) if model_dir else None
+        self.outputs_dir = Path(outputs_dir) if outputs_dir else Path("./outputs")
+        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> None:
         if self.pipe is not None:
             return
 
-        model_id = os.environ.get(
-            "HUNYUANIMAGE_21_MODEL_ID",
-            "Tencent-Hunyuan/HunyuanImage-2.1-base",
-        )
-
         self.pipe = HunyuanImagePipeline.from_pretrained(
-            model_id,
+            self.MODEL_ID,
             torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
         ).to(self.device)
 
-        # Small perf tweaks
         if self.device == "cuda":
-            self.pipe.enable_xformers_memory_efficient_attention()
+            try:
+                self.pipe.enable_xformers_memory_efficient_attention()
+            except Exception:
+                pass
+
         self.pipe.set_progress_bar_config(disable=True)
 
-    def generate(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Modly entrypoint.
+    def unload(self) -> None:
+        self.pipe = None
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
 
-        Expected inputs (from manifest.json):
+    def generate(
+        self,
+        params: Dict[str, Any],
+        progress_cb: ProgressCallback = None,
+        cancel_event: Optional[Any] = None,
+    ) -> str:
+        """
+        Main entrypoint.
+
+        params:
           - prompt: str
           - negative_prompt: Optional[str]
           - width: int
@@ -50,16 +74,20 @@ class HunyuanImage21Generator:
           - steps: int
           - guidance_scale: float
           - seed: int
-        """
-        self._load_pipeline()
 
-        prompt: str = inputs.get("prompt", "")
-        negative_prompt: str = inputs.get("negative_prompt", "")
-        width: int = int(inputs.get("width", 1024))
-        height: int = int(inputs.get("height", 1024))
-        steps: int = int(inputs.get("steps", 30))
-        guidance_scale: float = float(inputs.get("guidance_scale", 5.0))
-        seed: int = int(inputs.get("seed", 0))
+        Returns:
+          - path to generated PNG file (str)
+        """
+        self.load()
+        assert self.pipe is not None
+
+        prompt: str = params.get("prompt", "")
+        negative_prompt: str = params.get("negative_prompt", "")
+        width: int = int(params.get("width", 1024))
+        height: int = int(params.get("height", 1024))
+        steps: int = int(params.get("steps", 30))
+        guidance_scale: float = float(params.get("guidance_scale", 5.0))
+        seed: int = int(params.get("seed", 0))
 
         if not prompt:
             raise ValueError("prompt is required")
@@ -67,7 +95,14 @@ class HunyuanImage21Generator:
         if seed == 0:
             seed = random.randint(1, 2**31 - 1)
 
+        if progress_cb:
+            progress_cb(0.0, "starting HunyuanImage-2.1 generation")
+
         generator = torch.Generator(device=self.device).manual_seed(seed)
+
+        if cancel_event is not None and getattr(cancel_event, "is_set", None):
+            if cancel_event.is_set():
+                raise RuntimeError("generation cancelled before start")
 
         with torch.inference_mode():
             out = self.pipe(
@@ -82,23 +117,17 @@ class HunyuanImage21Generator:
 
         image: Image.Image = out.images[0]
 
-        return {
-            "image": image,
-            "meta": {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "width": width,
-                "height": height,
-                "steps": steps,
-                "guidance_scale": guidance_scale,
-                "seed": seed,
-                "model": "HunyuanImage-2.1-base",
-            },
-        }
+        out_name = f"hunyuanimage21_{seed}.png"
+        out_path = self.outputs_dir / out_name
+        image.save(out_path, format="PNG")
+
+        if progress_cb:
+            progress_cb(1.0, "done")
+
+        return str(out_path)
 
 
-# Modly usually expects a factory or a module-level symbol.
-# If your Modly integration uses a different hook, just point it to this class.
-
-def load() -> HunyuanImage21Generator:
-    return HunyuanImage21Generator()
+# Optional module-level helper if Modly prefers a function entrypoint.
+def generate(params: Dict[str, Any], progress_cb: ProgressCallback = None, cancel_event: Optional[Any] = None) -> str:
+    gen = HunyuanImage21Generator()
+    return gen.generate(params, progress_cb=progress_cb, cancel_event=cancel_event)
