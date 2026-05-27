@@ -1,9 +1,12 @@
 """
 HunyuanDiT Turbo - Text-to-Image generator for Modly.
 
-The prompt lives in params_schema so Modly renders it as a text field in the
-sidebar. image_bytes is unused (T2I has no input image).
+Single node: generate (no input -> image)
+Prompt + generation settings live in the node's params_schema.
+image_bytes is unused (T2I has no input image).
 """
+from __future__ import annotations
+
 import os
 import sys
 import time
@@ -11,6 +14,7 @@ import traceback
 import uuid
 from pathlib import Path
 from typing import Callable, Optional
+import threading
 
 # ------------------------------------------------------------------ #
 #  Inject extension venv site-packages (Windows + Linux/macOS)       #
@@ -42,15 +46,28 @@ def _get_hf_token():
 
 class HunyuanT2IGenerator(BaseGenerator):
 
-    MODEL_ID    = "hunyuan_t2i_turbo"
+    MODEL_ID     = "hunyuan_t2i_turbo"
     DISPLAY_NAME = "Hunyuan T2I Turbo"
-    VRAM_GB     = 6
+    VRAM_GB      = 6
 
     # ---------------------------------------------------------------- #
-    #  Lifecycle                                                        #
+    #  Download / lifecycle                                             #
     # ---------------------------------------------------------------- #
+
     def is_downloaded(self) -> bool:
         return (self.model_dir / "model_index.json").exists()
+
+    def _download_weights(self) -> None:
+        from huggingface_hub import snapshot_download
+        print("[HunyuanT2I] Downloading weights to {} ...".format(self.model_dir))
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id="Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
+            local_dir=str(self.model_dir),
+            local_dir_use_symlinks=False,
+            token=_get_hf_token(),
+        )
+        print("[HunyuanT2I] Download complete.")
 
     def load(self) -> None:
         if self._model is not None:
@@ -61,7 +78,8 @@ class HunyuanT2IGenerator(BaseGenerator):
         from diffusers import HunyuanDiTPipeline
         print("[HunyuanT2I] Loading pipeline from {} ...".format(self.model_dir))
         pipe = HunyuanDiTPipeline.from_pretrained(
-            str(self.model_dir), torch_dtype=torch.float16
+            str(self.model_dir),
+            torch_dtype=torch.float16,
         )
         pipe.enable_model_cpu_offload()
         self._model = pipe
@@ -79,25 +97,26 @@ class HunyuanT2IGenerator(BaseGenerator):
     # ---------------------------------------------------------------- #
     #  Inference                                                        #
     # ---------------------------------------------------------------- #
+
     def generate(
         self,
         image_bytes: bytes,
         params: dict,
         progress_cb: Optional[Callable[[int, str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> Path:
         import torch
+
         params = params or {}
-
-        prompt = str(params.get("prompt", "")).strip()
-        if not prompt:
-            prompt = "a beautiful landscape"
-
+        prompt = str(params.get("prompt", "")).strip() or "a beautiful landscape"
         steps  = int(params.get("num_inference_steps", 20))
         seed   = int(params.get("seed", -1))
         height = int(params.get("height", 1024))
         width  = int(params.get("width", 1024))
 
-        print("[HunyuanT2I] prompt='{}' steps={} seed={}".format(prompt, steps, seed))
+        print("[HunyuanT2I] prompt='{}' steps={} seed={} {}x{}".format(
+            prompt, steps, seed, width, height
+        ))
 
         self._report(progress_cb, 5, "Loading model ...")
         if self._model is None:
@@ -126,72 +145,3 @@ class HunyuanT2IGenerator(BaseGenerator):
         self._report(progress_cb, 100, "Done")
         print("[HunyuanT2I] saved -> {}".format(out))
         return out
-
-    # ---------------------------------------------------------------- #
-    #  Download helper (called from load() if weights are missing)     #
-    # ---------------------------------------------------------------- #
-    def _download_weights(self) -> None:
-        from huggingface_hub import snapshot_download
-        print("[HunyuanT2I] Downloading weights to {} ...".format(self.model_dir))
-        snapshot_download(
-            repo_id="Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
-            local_dir=str(self.model_dir),
-            local_dir_use_symlinks=False,
-            token=_get_hf_token(),
-        )
-        print("[HunyuanT2I] Download complete.")
-
-    # ---------------------------------------------------------------- #
-    #  UI params — rendered by Modly in the sidebar                    #
-    # ---------------------------------------------------------------- #
-    @classmethod
-    def params_schema(cls) -> list:
-        return [
-            {
-                "id": "prompt",
-                "label": "Prompt",
-                "type": "string",
-                "default": "a beautiful landscape",
-            },
-            {
-                "id": "num_inference_steps",
-                "label": "Quality",
-                "type": "select",
-                "default": 20,
-                "options": [
-                    {"value": 10, "label": "Fast (10 steps)"},
-                    {"value": 20, "label": "Balanced (20 steps)"},
-                    {"value": 30, "label": "High (30 steps)"},
-                ],
-            },
-            {
-                "id": "height",
-                "label": "Height",
-                "type": "select",
-                "default": 1024,
-                "options": [
-                    {"value": 512,  "label": "512 px"},
-                    {"value": 768,  "label": "768 px"},
-                    {"value": 1024, "label": "1024 px"},
-                ],
-            },
-            {
-                "id": "width",
-                "label": "Width",
-                "type": "select",
-                "default": 1024,
-                "options": [
-                    {"value": 512,  "label": "512 px"},
-                    {"value": 768,  "label": "768 px"},
-                    {"value": 1024, "label": "1024 px"},
-                ],
-            },
-            {
-                "id": "seed",
-                "label": "Seed  (-1 = random)",
-                "type": "int",
-                "default": -1,
-                "min": -1,
-                "max": 2147483647,
-            },
-        ]
