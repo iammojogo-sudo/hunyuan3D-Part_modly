@@ -16,9 +16,9 @@
       "name": "Generate Image",
       "input": "prompt",
       "output": "image",
+      "model_id": "hunyuan_image_2_1_t2i/generate",
       "hf_repo": "Tencent-Hunyuan/HunyuanImage-2.1",
-      "download_check": "base",
-      "hf_skip_prefixes": [],
+      "download_check": ["base/model_index.json", "base/config.json"],
       "params_schema": [
         { "id": "prompt", "label": "Prompt", "type": "string", "required": true },
         { "id": "negative_prompt", "label": "Negative Prompt", "type": "string" },
