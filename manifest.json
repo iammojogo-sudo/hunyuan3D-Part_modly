@@ -3,7 +3,7 @@
   "name": "Hunyuan T2I Turbo",
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
-  "description": "HunyuanDiT v1.2 distilled text-to-image. Connect any image node as a placeholder input, type your prompt in the field below.",
+  "description": "HunyuanDiT v1.2 distilled text-to-image. Connect a Text node as the input.",
   "version": "0.1.0",
   "author": "iammojogo",
   "generator_class": "HunyuanT2IGenerator",
@@ -13,17 +13,13 @@
     {
       "id": "generate",
       "name": "Generate Image",
-      "input": "image",
+      "type": "process",
+      "entry": "processor.js",
+      "input": "text",
       "output": "image",
       "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
       "download_check": "model_index.json",
       "params_schema": [
-        {
-          "id": "prompt",
-          "label": "Prompt",
-          "type": "string",
-          "default": "a beautiful landscape"
-        },
         {
           "id": "num_inference_steps",
           "label": "Steps",
