@@ -11,6 +11,7 @@ from PIL import Image
 
 from services.generators.base import BaseGenerator, smooth_progress
 
+
 # Redirect print to stderr so stdout stays clean for the JSON runner protocol.
 _print = print
 
@@ -20,7 +21,7 @@ def print(*args, **kwargs):
     _print(*args, **kwargs)
 
 
-_HF_REPO_ID = "Tencent-Hunyuan/HunyuanImage-2.1"
+_HF_REPO_ID = "tencent/HunyuanImage-2.1"
 
 
 def _safe_float(val, default):
@@ -40,7 +41,7 @@ def _safe_int(val, default):
 class HunyuanImage21Generator(BaseGenerator):
     MODEL_ID     = "hunyuan_image_2_1_t2i"
     DISPLAY_NAME = "HunyuanImage 2.1 Text-to-Image"
-    VRAM_GB      = 6
+    VRAM_GB      = 24
 
     # ------------------------------------------------------------------
     # Download checks
@@ -49,7 +50,7 @@ class HunyuanImage21Generator(BaseGenerator):
     def is_downloaded(self):
         if self.download_check:
             return (self.model_dir / self.download_check).exists()
-        return (self.model_dir / "base" / "config.json").exists()
+        return (self.model_dir / "config.json").exists()
 
     # ------------------------------------------------------------------
     # Load / unload
@@ -62,44 +63,35 @@ class HunyuanImage21Generator(BaseGenerator):
         if not self.is_downloaded():
             self._download_weights()
 
+        # Add the hyimage library from the cloned repo to sys.path so the
+        # pipeline import works when the extension's venv is active.
+        repo_dir = Path(__file__).parent / "HunyuanImage-2.1"
+        if repo_dir.exists() and str(repo_dir) not in sys.path:
+            sys.path.insert(0, str(repo_dir))
+
         import torch
 
         try:
-            from diffusers import HunyuanImagePipeline
+            from hyimage.diffusion.pipelines.hunyuanimage_pipeline import HunyuanImagePipeline
         except ImportError:
             raise RuntimeError(
-                "diffusers HunyuanImagePipeline not available; "
-                "run Repair on the extension to reinstall dependencies."
+                "hyimage library not found. Run Repair on the extension "
+                "to reinstall dependencies and clone the HunyuanImage-2.1 repo."
             )
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._dtype  = torch.float16 if self._device == "cuda" else torch.float32
 
         print("[HunyuanImage21Generator] Loading pipeline from %s ..." % self.model_dir)
 
-        try:
-            pipe = HunyuanImagePipeline.from_pretrained(
-                str(self.model_dir),
-                local_files_only=True,
-                torch_dtype=self._dtype,
-            ).to(self._device)
-        except Exception as e_local:
-            print("[HunyuanImage21Generator] Local load failed (%s), trying HF remote ..." % e_local)
-            pipe = HunyuanImagePipeline.from_pretrained(
-                _HF_REPO_ID,
-                torch_dtype=self._dtype,
-            ).to(self._device)
+        # The hyimage pipeline resolves weights relative to its own working
+        # directory, so we point it at our downloaded model_dir.
+        os.environ["HUNYUAN_IMAGE_CKPT_DIR"] = str(self.model_dir)
 
-        try:
-            if self._device == "cuda":
-                pipe.enable_xformers_memory_efficient_attention()
-        except Exception:
-            pass
-
-        try:
-            pipe.set_progress_bar_config(disable=True)
-        except Exception:
-            pass
+        pipe = HunyuanImagePipeline.from_pretrained(
+            model_name="hunyuanimage-v2.1",
+            use_fp8=True,
+        )
+        pipe = pipe.to(self._device)
 
         self._model = pipe
         print("[HunyuanImage21Generator] Loaded on %s." % self._device)
@@ -107,7 +99,6 @@ class HunyuanImage21Generator(BaseGenerator):
     def unload(self):
         self._model  = None
         self._device = None
-        self._dtype  = None
         try:
             import torch
             if torch.cuda.is_available():
@@ -129,10 +120,10 @@ class HunyuanImage21Generator(BaseGenerator):
             raise ValueError("prompt is required")
 
         negative_prompt = params.get("negative_prompt") or None
-        width           = _safe_int(params.get("width"), 1024)
-        height          = _safe_int(params.get("height"), 1024)
-        steps           = _safe_int(params.get("steps"), 30)
-        guidance_scale  = _safe_float(params.get("guidance_scale"), 5.0)
+        width           = _safe_int(params.get("width"),  2048)
+        height          = _safe_int(params.get("height"), 2048)
+        steps           = _safe_int(params.get("steps"),  8)
+        guidance_scale  = _safe_float(params.get("guidance_scale"), 3.25)
         seed_val        = _safe_int(params.get("seed"), 0)
         if seed_val == 0:
             seed_val = random.randint(1, 2 ** 31 - 1)
@@ -140,11 +131,9 @@ class HunyuanImage21Generator(BaseGenerator):
         self._report(progress_cb, 5, "Starting generation ...")
         self._check_cancelled(cancel_event)
 
-        generator = torch.Generator(device=self._device).manual_seed(seed_val)
-
         self._report(progress_cb, 10, "Generating image ...")
 
-        stop_evt      = threading.Event()
+        stop_evt        = threading.Event()
         progress_thread = None
         if progress_cb:
             progress_thread = threading.Thread(
@@ -155,17 +144,19 @@ class HunyuanImage21Generator(BaseGenerator):
             progress_thread.start()
 
         try:
-            with torch.inference_mode():
-                out = self._model(
-                    prompt=prompt,
-                    negative_prompt=negative_prompt,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance_scale,
-                    width=width,
-                    height=height,
-                    generator=generator,
-                )
-            image = out.images[0]
+            result = self._model(
+                prompt=prompt,
+                width=width,
+                height=height,
+                use_reprompt=False,
+                use_refiner=True,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                seed=seed_val,
+            )
+            image = result[0] if isinstance(result, (list, tuple)) else result
+            if not isinstance(image, Image.Image):
+                image = image.images[0]
         finally:
             stop_evt.set()
             if progress_thread:
@@ -200,7 +191,7 @@ class HunyuanImage21Generator(BaseGenerator):
             ignore.append(pattern)
             if isinstance(pattern, str) and pattern.endswith("/"):
                 ignore.append(pattern + "*")
-        ignore += ["*.md", "*.txt", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"]
+        ignore += ["*.md", "LICENSE", "NOTICE", ".gitattributes", "assets/*"]
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
         print("[HunyuanImage21Generator] Downloading weights from %s ..." % repo_id)
