@@ -1,267 +1,195 @@
 """
-generator.py
-
-Modly-compatible generator that:
-- exposes module-level download hooks Modly calls,
-- downloads HF repo into ~/.modly/models/<model_id>/ using snapshot_download,
-- normalizes snapshot layout so base/, vae/, etc. are directly under the model folder,
-- loads diffusers pipeline with local_files_only=True and falls back to HF remote if needed,
-- exposes load(), unload(), generate() on the generator class and module-level helpers.
+generator.py — Modly extension for HunyuanImage 2.1 text-to-image.
 """
 
+import io
 import os
 import random
-import shutil
+import sys
+import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Callable, Tuple
 
-import torch
-from PIL import Image
+from services.generators.base import BaseGenerator, smooth_progress
 
-# Try to import pipeline class from diffusers
-try:
-    from diffusers import HunyuanImagePipeline  # type: ignore
-    _HAS_PIPELINE = True
-except Exception:
-    HunyuanImagePipeline = None  # type: ignore
-    _HAS_PIPELINE = False
+# Redirect print to stderr so stdout stays clean for the JSON runner protocol.
+_print = print
 
-# huggingface_hub for snapshot_download
-try:
-    from huggingface_hub import snapshot_download  # type: ignore
-    _HAS_HF_HUB = True
-except Exception:
-    snapshot_download = None  # type: ignore
-    _HAS_HF_HUB = False
+def print(*args, **kwargs):
+    kwargs.setdefault("file", sys.stderr)
+    _print(*args, **kwargs)
 
-ProgressCallback = Optional[Callable[[float, str], None]]
+_HF_REPO_ID = "Tencent-Hunyuan/HunyuanImage-2.1"
 
 
-class HunyuanImage21Generator:
-    HF_REPO = "Tencent-Hunyuan/HunyuanImage-2.1"
-    NODE_MODEL_ID = "hunyuan_image_2_1_t2i/generate"
-    DEFAULT_MODELS_DIR = Path.home() / ".modly" / "models"
-    DEFAULT_OUTPUTS_DIR = Path("./outputs")
+class HunyuanImage21Generator(BaseGenerator):
 
-    def __init__(self, model_dir: Optional[str] = None, outputs_dir: Optional[str] = None):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model_dir = Path(model_dir) if model_dir else None
-        self.outputs_dir = Path(outputs_dir or self.DEFAULT_OUTPUTS_DIR)
-        self.outputs_dir.mkdir(parents=True, exist_ok=True)
-        self.pipe = None
-        self._loaded_from = None
+    MODEL_ID = "hunyuan_image_2_1_t2i"
+    DISPLAY_NAME = "HunyuanImage 2.1 Text-to-Image"
+    VRAM_GB = 6
 
-    # Path helpers
-    def _resolve_models_dir(self) -> Path:
-        if self.model_dir:
-            return self.model_dir
-        env = os.environ.get("MODLY_MODELS_DIR") or os.environ.get("MODEL_DIR") or os.environ.get("MODLY_MODEL_DIR")
-        if env:
-            return Path(env)
-        return self.DEFAULT_MODELS_DIR
+    # ------------------------------------------------------------------
+    # Download check
+    # ------------------------------------------------------------------
 
-    def _target_model_path(self, model_id: Optional[str] = None) -> Path:
-        base = self._resolve_models_dir()
-        mid = model_id if model_id else self.NODE_MODEL_ID
-        return base / mid
-
-    def _downloaded_root_from_snapshot(self, snapshot_root: Path) -> Path:
-        repo_name = self.HF_REPO.split("/")[-1]
-        candidate = snapshot_root / repo_name
-        if candidate.exists() and any(candidate.iterdir()):
-            return candidate
-        if any((snapshot_root / p).exists() for p in ("base", "vae", "text_encoder")):
-            return snapshot_root
-        return snapshot_root
-
-    # Download checks
-    def is_downloaded(self, model_id: Optional[str] = None) -> bool:
-        target = self._target_model_path(model_id)
-        checks = ["base/config.json", "base/pytorch_model.safetensors", "vae/config.json"]
+    def is_downloaded(self):
+        checks = ["base/config.json", "vae/config.json"]
         for c in checks:
-            if not (target / c).exists():
+            if not (self.model_dir / c).exists():
                 return False
         return True
 
-    def download_weights(self, model_id: Optional[str] = None, progress_cb: ProgressCallback = None) -> Tuple[bool, str]:
-        if not _HAS_HF_HUB:
-            return False, "huggingface_hub not installed in extension venv"
+    # ------------------------------------------------------------------
+    # Download
+    # ------------------------------------------------------------------
 
-        target = self._target_model_path(model_id)
-        target.mkdir(parents=True, exist_ok=True)
+    def _auto_download(self):
+        self._download_weights()
 
-        try:
-            if progress_cb:
-                progress_cb(0.0, "starting download from Hugging Face")
-            snapshot_dir = snapshot_download(repo_id=self.HF_REPO, cache_dir=str(target), repo_type="model")
-            snapshot_path = Path(snapshot_dir)
-            root = self._downloaded_root_from_snapshot(snapshot_path)
+    def _download_weights(self):
+        from huggingface_hub import snapshot_download
 
-            if root != target:
-                for item in root.iterdir():
-                    dest = target / item.name
-                    if dest.exists():
-                        if dest.is_dir():
-                            shutil.rmtree(dest)
-                        else:
-                            dest.unlink()
-                    shutil.move(str(item), str(dest))
-                try:
-                    if root.exists() and root != target:
-                        shutil.rmtree(root)
-                except Exception:
-                    pass
+        repo_id = self.hf_repo or _HF_REPO_ID
 
-            if progress_cb:
-                progress_cb(1.0, "download complete")
+        ignore = ["*.md", "*.txt", "LICENSE", "NOTICE", "Notice.txt", ".gitattributes"]
 
-            if self.is_downloaded(model_id):
-                return True, f"Downloaded to {str(target)}"
-            else:
-                return False, f"Downloaded but required files not found under {str(target)}"
-        except Exception as e:
-            return False, f"Download failed: {e}"
+        self.model_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load / Unload / Generate
-    def load(self, model_id: Optional[str] = None, progress_cb: ProgressCallback = None) -> None:
-        if self.pipe is not None:
+        print("[HunyuanImage21Generator] Downloading weights from %s ..." % repo_id)
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=str(self.model_dir),
+            ignore_patterns=ignore,
+        )
+        print("[HunyuanImage21Generator] Weights downloaded to %s." % self.model_dir)
+
+    # ------------------------------------------------------------------
+    # Load / Unload
+    # ------------------------------------------------------------------
+
+    def load(self):
+        if self._model is not None:
             return
 
-        target = self._target_model_path(model_id)
+        if not self.is_downloaded():
+            self._auto_download()
 
-        if not self.is_downloaded(model_id):
-            ok, msg = self.download_weights(model_id=model_id, progress_cb=progress_cb)
-            if not ok:
-                if progress_cb:
-                    progress_cb(0.0, f"local download failed: {msg}; attempting remote load")
-            else:
-                if progress_cb:
-                    progress_cb(0.0, f"model ready at {str(target)}")
-
-        if target.exists() and any(target.iterdir()):
-            if not _HAS_PIPELINE:
-                raise RuntimeError("diffusers HunyuanImagePipeline not available; install compatible diffusers")
-            try:
-                self.pipe = HunyuanImagePipeline.from_pretrained(
-                    str(target),
-                    local_files_only=True,
-                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                ).to(self.device)
-                self._loaded_from = f"local:{str(target)}"
-            except Exception as e_local:
-                try:
-                    self.pipe = HunyuanImagePipeline.from_pretrained(
-                        self.HF_REPO,
-                        torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                    ).to(self.device)
-                    self._loaded_from = f"hf:{self.HF_REPO}"
-                except Exception as e_remote:
-                    raise RuntimeError(f"Failed to load pipeline locally ({e_local}) and remotely ({e_remote})")
-        else:
-            if not _HAS_PIPELINE:
-                raise RuntimeError("diffusers HunyuanImagePipeline not available; install compatible diffusers")
-            try:
-                self.pipe = HunyuanImagePipeline.from_pretrained(
-                    self.HF_REPO,
-                    torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                ).to(self.device)
-                self._loaded_from = f"hf:{self.HF_REPO}"
-            except Exception as e:
-                raise RuntimeError(f"Failed to load pipeline from HF repo {self.HF_REPO}: {e}")
+        import torch
 
         try:
-            if self.device == "cuda":
-                self.pipe.enable_xformers_memory_efficient_attention()
+            from diffusers import HunyuanImagePipeline
+        except ImportError:
+            raise RuntimeError(
+                "diffusers HunyuanImagePipeline not available; "
+                "run setup or reinstall the extension."
+            )
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+
+        print("[HunyuanImage21Generator] Loading pipeline from %s ..." % self.model_dir)
+
+        try:
+            pipe = HunyuanImagePipeline.from_pretrained(
+                str(self.model_dir),
+                local_files_only=True,
+                torch_dtype=dtype,
+            ).to(device)
+        except Exception as e_local:
+            print("[HunyuanImage21Generator] Local load failed (%s), trying HF remote..." % e_local)
+            pipe = HunyuanImagePipeline.from_pretrained(
+                _HF_REPO_ID,
+                torch_dtype=dtype,
+            ).to(device)
+
+        try:
+            if device == "cuda":
+                pipe.enable_xformers_memory_efficient_attention()
         except Exception:
             pass
 
         try:
-            self.pipe.set_progress_bar_config(disable=True)
+            pipe.set_progress_bar_config(disable=True)
         except Exception:
             pass
 
-    def unload(self) -> None:
-        self.pipe = None
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
+        self._model = pipe
+        self._device = device
+        self._dtype = dtype
 
-    def generate(
-        self,
-        params: Dict[str, Any],
-        progress_cb: ProgressCallback = None,
-        cancel_event: Optional[Any] = None,
-        model_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        self.load(model_id=model_id, progress_cb=progress_cb)
-        if self.pipe is None:
-            raise RuntimeError("pipeline not loaded")
+        print("[HunyuanImage21Generator] Loaded on %s." % device)
+
+    def unload(self):
+        self._device = None
+        self._dtype = None
+        super().unload()
+
+    # ------------------------------------------------------------------
+    # Generate
+    # ------------------------------------------------------------------
+
+    def generate(self, image_bytes, params, progress_cb=None, cancel_event=None):
+        import torch
+
+        params = params or {}
 
         prompt = params.get("prompt", "")
         if not prompt:
             raise ValueError("prompt is required")
 
-        negative_prompt = params.get("negative_prompt", None)
+        negative_prompt = params.get("negative_prompt") or None
         width = int(params.get("width", 1024))
         height = int(params.get("height", 1024))
         steps = int(params.get("steps", 30))
         guidance_scale = float(params.get("guidance_scale", 5.0))
-        seed = int(params.get("seed", 0)) or random.randint(1, 2**31 - 1)
+        seed_val = int(params.get("seed", 0))
+        if seed_val == 0:
+            seed_val = random.randint(1, 2 ** 31 - 1)
 
+        self._report(progress_cb, 5, "Starting generation...")
+        self._check_cancelled(cancel_event)
+
+        generator = torch.Generator(device=self._device).manual_seed(seed_val)
+
+        self._report(progress_cb, 10, "Generating image...")
+
+        import threading
+        stop_evt = threading.Event()
+        progress_thread = None
         if progress_cb:
-            progress_cb(0.0, "starting generation")
-
-        if cancel_event is not None and getattr(cancel_event, "is_set", None):
-            if cancel_event.is_set():
-                raise RuntimeError("generation cancelled before start")
-
-        generator = torch.Generator(device=self.device).manual_seed(seed)
-
-        with torch.inference_mode():
-            out = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=steps,
-                guidance_scale=guidance_scale,
-                width=width,
-                height=height,
-                generator=generator,
+            progress_thread = threading.Thread(
+                target=smooth_progress,
+                args=(progress_cb, 10, 95, "Generating image...", stop_evt),
+                daemon=True,
             )
+            progress_thread.start()
 
-        image: Image.Image = out.images[0]
+        try:
+            with torch.inference_mode():
+                out = self._model(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    width=width,
+                    height=height,
+                    generator=generator,
+                )
+            image = out.images[0]
+        finally:
+            stop_evt.set()
+            if progress_thread:
+                progress_thread.join(timeout=1.0)
 
-        out_name = f"hunyuan_{seed}.png"
+        self._check_cancelled(cancel_event)
+
+        self._report(progress_cb, 98, "Saving image...")
+        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        out_name = "hunyuan21_%d_%s.png" % (int(time.time()), uuid.uuid4().hex[:8])
         out_path = self.outputs_dir / out_name
-        image.save(out_path, format="PNG")
+        image.save(str(out_path), format="PNG")
 
-        if progress_cb:
-            progress_cb(1.0, "done")
+        self._report(progress_cb, 100, "Done")
 
-        meta = {
-            "prompt": prompt,
-            "negative_prompt": negative_prompt,
-            "width": width,
-            "height": height,
-            "steps": steps,
-            "guidance_scale": guidance_scale,
-            "seed": seed,
-            "loaded_from": self._loaded_from,
-            "model_id": model_id or self.NODE_MODEL_ID,
-        }
-
-        return {"image_path": str(out_path), "meta": meta}
-
-
-# Module-level helpers for Modly backend
-_default_gen = HunyuanImage21Generator()
-
-
-def is_downloaded_for_model(model_id: Optional[str] = None) -> bool:
-    return _default_gen.is_downloaded(model_id=model_id)
-
-
-def download_weights_for_model(model_id: Optional[str] = None, progress_cb: ProgressCallback = None) -> Tuple[bool, str]:
-    return _default_gen.download_weights(model_id=model_id, progress_cb=progress_cb)
-
-
-def generate(params: Dict[str, Any], progress_cb: ProgressCallback = None, cancel_event: Optional[Any] = None) -> Dict[str, Any]:
-    return _default_gen.generate(params, progress_cb=progress_cb, cancel_event=cancel_event)
+        print("[HunyuanImage21Generator] Saved to %s" % out_path)
+        return str(out_path)
