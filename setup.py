@@ -1,5 +1,4 @@
 import json
-import os
 import platform
 import subprocess
 import sys
@@ -27,19 +26,15 @@ def setup(python_exe, ext_dir, gpu_sm):
     ext_dir = Path(ext_dir)
     venv = ext_dir / "venv"
 
-    # Create venv
     subprocess.run([str(python_exe), "-m", "venv", str(venv)], check=True)
     py = venv_python(venv)
 
-    # Upgrade pip
     pip(py, "install", "--upgrade", "pip", "setuptools", "wheel")
 
-    # Install torch
     idx = torch_index(gpu_sm)
     print("[setup] torch index:", idx)
     pip(py, "install", "torch", "torchvision", "--index-url", idx)
 
-    # Core deps for HunyuanImage-2.1
     pip(py, "install",
         "diffusers>=0.30.0",
         "transformers>=4.40.0",
