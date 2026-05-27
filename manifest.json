@@ -3,10 +3,10 @@
   "name": "HunyuanImage 2.1 Text-to-Image",
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/hunyuan2.1_t2i_modly",
-  "description": "Text-to-image generator using Tencent HunyuanImage-2.1.",
+  "description": "Text-to-image generator using Tencent HunyuanImage-2.1. Generates 2K resolution images. Requires 24GB+ VRAM.",
   "version": "1.0.0",
   "author": "iammojogo",
-  "vram_gb": 6,
+  "vram_gb": 24,
   "tags": ["text-to-image", "hunyuan", "t2i"],
   "nodes": [
     {
@@ -14,16 +14,16 @@
       "name": "Generate Image",
       "input": "prompt",
       "output": "image",
-      "hf_repo": "Tencent-Hunyuan/HunyuanImage-2.1",
-      "download_check": "base/config.json",
+      "hf_repo": "tencent/HunyuanImage-2.1",
+      "download_check": "config.json",
       "params_schema": [
-        { "id": "prompt",           "label": "Prompt",          "type": "string",  "required": true },
-        { "id": "negative_prompt",  "label": "Negative Prompt", "type": "string"   },
-        { "id": "width",            "label": "Width",           "type": "int",     "default": 1024, "min": 256, "max": 1536 },
-        { "id": "height",           "label": "Height",          "type": "int",     "default": 1024, "min": 256, "max": 1536 },
-        { "id": "steps",            "label": "Steps",           "type": "int",     "default": 30,   "min": 4,   "max": 80   },
-        { "id": "guidance_scale",   "label": "Guidance Scale",  "type": "float",   "default": 5.0,  "min": 0.0, "max": 20.0 },
-        { "id": "seed",             "label": "Seed",            "type": "int",     "default": 0,    "min": 0,   "max": 4294967295 }
+        { "id": "prompt",          "label": "Prompt",         "type": "string",  "required": true },
+        { "id": "negative_prompt", "label": "Negative Prompt","type": "string"   },
+        { "id": "width",           "label": "Width",          "type": "int",     "default": 2048, "min": 1024, "max": 2560 },
+        { "id": "height",          "label": "Height",         "type": "int",     "default": 2048, "min": 1024, "max": 2560 },
+        { "id": "steps",           "label": "Steps",          "type": "int",     "default": 8,    "min": 4,    "max": 50   },
+        { "id": "guidance_scale",  "label": "Guidance Scale", "type": "float",   "default": 3.25, "min": 1.0,  "max": 10.0 },
+        { "id": "seed",            "label": "Seed",           "type": "int",     "default": 0,    "min": 0,    "max": 4294967295 }
       ]
     }
   ],
