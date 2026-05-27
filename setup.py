@@ -1,3 +1,9 @@
+"""
+setup.py
+
+Creates a venv under the extension folder and installs required packages for HunyuanImage-2.1.
+"""
+
 import json
 import platform
 import subprocess
@@ -35,16 +41,25 @@ def setup(python_exe, ext_dir, gpu_sm):
     print("[setup] torch index:", idx)
     pip(py, "install", "torch", "torchvision", "--index-url", idx)
 
+    # Core deps for HunyuanImage-2.1
     pip(py, "install",
+        "huggingface_hub>=0.16.4",
         "diffusers>=0.30.0",
         "transformers>=4.40.0",
         "accelerate>=0.30.0",
+        "safetensors",
         "sentencepiece",
         "protobuf",
         "Pillow",
         "numpy",
         "tqdm",
     )
+
+    # xformers is optional; install only if available for the environment
+    try:
+        pip(py, "install", "xformers")
+    except Exception:
+        print("[setup] xformers install failed or not available; continuing without it")
 
     print("[setup] done")
 
