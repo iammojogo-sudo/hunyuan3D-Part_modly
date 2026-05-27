@@ -1,10 +1,3 @@
-"""
-setup.py
-
-Installs a venv and required packages for the extension.
-This mirrors the example extension's setup pattern and ensures huggingface_hub and diffusers are present.
-"""
-
 import json
 import platform
 import subprocess
@@ -15,6 +8,10 @@ IS_WIN = platform.system() == "Windows"
 
 
 def pip(venv, *args):
+    """
+    Run pip inside the venv. venv is a Path to the venv folder.
+    Example: pip(venv, 'install', 'package')
+    """
     pip_exe = venv / ("Scripts/pip.exe" if IS_WIN else "bin/pip")
     subprocess.run([str(pip_exe)] + list(args), check=True)
 
@@ -38,11 +35,13 @@ def setup(python_exe, ext_dir, gpu_sm):
     subprocess.run([str(python_exe), "-m", "venv", str(venv)], check=True)
     venv_python = python_exe_in_venv(venv)
 
+    # Upgrade pip/setuptools/wheel inside venv first
+    print("[setup] Upgrading pip, setuptools, wheel in venv...")
     pip(venv, "install", "--upgrade", "pip", "setuptools", "wheel")
 
+    # Install torch (index chosen by GPU SM)
     idx = torch_index(gpu_sm)
     print("[setup] torch index:", idx)
-    # Minimal torch install; Modly may already provide torch; keep this flexible
     pip(venv, "install", "torch", "torchvision", "--index-url", idx)
 
     # Core deps
