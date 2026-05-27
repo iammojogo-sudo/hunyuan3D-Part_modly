@@ -1,9 +1,9 @@
 """
 HunyuanDiT Turbo - Text-to-Image generator for Modly.
 
-Single node: generate (no input -> image)
-Prompt + generation settings live in the node's params_schema.
-image_bytes is unused (T2I has no input image).
+Single node: generate (text -> image)
+The prompt comes from the connected Text input node via image_bytes.
+Generation settings (steps, size, seed) are in params_schema.
 """
 from __future__ import annotations
 
@@ -42,6 +42,25 @@ def _get_hf_token():
         if v:
             return v
     return None
+
+
+def _extract_prompt(image_bytes):
+    """
+    Modly passes the connected text node's content as image_bytes.
+    Try to decode it as UTF-8 text. If it looks like a file path,
+    read that file instead. Fall back to empty string on any failure.
+    """
+    if not image_bytes:
+        return ""
+    try:
+        text = image_bytes.decode("utf-8").strip()
+        # If it decoded cleanly and looks like a file path, read it
+        p = Path(text)
+        if p.exists() and p.is_file():
+            return p.read_text(encoding="utf-8").strip()
+        return text
+    except Exception:
+        return ""
 
 
 class HunyuanT2IGenerator(BaseGenerator):
@@ -108,7 +127,12 @@ class HunyuanT2IGenerator(BaseGenerator):
         import torch
 
         params = params or {}
-        prompt = str(params.get("prompt", "")).strip() or "a beautiful landscape"
+
+        # Prompt comes from the connected text node via image_bytes
+        prompt = _extract_prompt(image_bytes)
+        if not prompt:
+            prompt = "a beautiful landscape"
+
         steps  = int(params.get("num_inference_steps", 20))
         seed   = int(params.get("seed", -1))
         height = int(params.get("height", 1024))
