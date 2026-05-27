@@ -6,10 +6,10 @@
   "output": "image",
   "entry": "generator.py",
   "generator_class": "HunyuanImage21Generator",
-  "author": "Your Name",
+  "author": "iammojogo",
   "source": "https://github.com/iammojogo-sudo/hunyuan_t2i_turbo_modly",
   "description": "Text-to-image generator using Tencent HunyuanImage-2.1 (base).",
-  "tags": ["text-to-image","hunyuan","t2i"],
+  "tags": ["text-to-image", "hunyuan", "t2i"],
   "nodes": [
     {
       "id": "generate",
@@ -18,7 +18,7 @@
       "output": "image",
       "model_id": "hunyuan_image_2_1_t2i/generate",
       "hf_repo": "Tencent-Hunyuan/HunyuanImage-2.1",
-      "download_check": ["base/model_index.json", "base/config.json"],
+      "download_check": ["base/config.json", "base/pytorch_model.safetensors", "vae/config.json"],
       "params_schema": [
         { "id": "prompt", "label": "Prompt", "type": "string", "required": true },
         { "id": "negative_prompt", "label": "Negative Prompt", "type": "string" },
