@@ -17,7 +17,7 @@ def venv_python(venv):
 
 
 def torch_index(gpu_sm):
-    # cu121 for anything ampere and up, cu118 for older stuff
+    # cu121 for Ampere+ (SM >= 80), cu118 for older GPUs
     if gpu_sm >= 80:
         return "https://download.pytorch.org/whl/cu121"
     return "https://download.pytorch.org/whl/cu118"
@@ -27,22 +27,25 @@ def setup(python_exe, ext_dir, gpu_sm):
     ext_dir = Path(ext_dir)
     venv = ext_dir / "venv"
 
+    # Create venv
     subprocess.run([str(python_exe), "-m", "venv", str(venv)], check=True)
     py = venv_python(venv)
 
+    # Upgrade pip
     pip(py, "install", "--upgrade", "pip", "setuptools", "wheel")
 
+    # Install torch
     idx = torch_index(gpu_sm)
     print("[setup] torch index:", idx)
     pip(py, "install", "torch", "torchvision", "--index-url", idx)
 
-    pip(py, "install", "--upgrade", "huggingface_hub>=0.16.4")
-
-    pip(py, "install", "--upgrade",
-        "diffusers>=0.27.0",
-        "transformers>=4.39.0",
-        "accelerate",
-        "safetensors",
+    # Core deps for HunyuanImage-2.1
+    pip(py, "install",
+        "diffusers>=0.30.0",
+        "transformers>=4.40.0",
+        "accelerate>=0.30.0",
+        "sentencepiece",
+        "protobuf",
         "Pillow",
         "numpy",
         "tqdm",
