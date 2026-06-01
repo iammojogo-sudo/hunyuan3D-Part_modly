@@ -91,6 +91,7 @@ def setup(python_exe, ext_dir, gpu_sm):
         "Pillow",
         "numpy",
         "scipy",
+        "scikit-image",
         "trimesh",
         "pymeshlab",
         "tqdm",
