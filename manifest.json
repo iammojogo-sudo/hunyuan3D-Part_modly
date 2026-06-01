@@ -96,5 +96,11 @@
       ]
     }
   ],
-  "generator_class": "Hunyuan3DPartGenerator"
+  "generator_class": "Hunyuan3DPartGenerator",
+  "setup": {
+    "kind": "python-root-setup-py",
+    "entry": "setup.py",
+    "owner": "electron",
+    "install_behavior": "explicit-managed-setup"
+  }
 }
