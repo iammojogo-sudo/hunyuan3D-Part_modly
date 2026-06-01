@@ -1,80 +1,100 @@
 {
-  "id": "hunyuandit_1_2_t2i",
-  "name": "HunyuanDiT v1.2 Text-to-Image",
+  "id": "hunyuan3d-part",
+  "name": "Hunyuan3D-Part",
   "type": "model",
-  "source": "https://github.com/iammojogo-sudo/hunyuanDIT1.2_t2i_modly",
-  "description": "Fast text-to-image generation using Tencent HunyuanDiT v1.2 Distilled. Supports English and Chinese prompts. ~6GB VRAM.",
+  "source": "https://github.com/iammojogo-sudo/hunyuan3d-part-modly",
+  "description": "Mesh part decomposition using Tencent Hunyuan3D-Part. Accepts a GLB mesh and returns a multi-part decomposed GLB.",
   "version": "1.0.0",
   "author": "iammojogo",
-  "vram_gb": 6,
+  "vram_gb": 12,
   "tags": [
-    "text-to-image",
-    "hunyuan",
-    "t2i"
+    "mesh",
+    "decomposition",
+    "segmentation"
   ],
   "nodes": [
     {
-      "id": "generate",
-      "name": "Generate Image",
-      "input": "image",
-      "output": "image",
-      "hf_repo": "Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers-Distilled",
-      "download_check": "model_index.json",
+      "id": "decompose-mesh",
+      "name": "Decompose Mesh",
+      "inputs": [
+        "mesh"
+      ],
+      "input": "mesh",
+      "output": "mesh",
+      "hf_repo": "tencent/Hunyuan3D-Part",
+      "download_check": "p3sam/p3sam.safetensors",
       "params_schema": [
         {
-          "id": "prompt",
-          "label": "Prompt",
-          "type": "string",
-          "default": ""
-        },
-        {
-          "id": "negative_prompt",
-          "label": "Negative Prompt",
-          "type": "string",
-          "default": ""
-        },
-        {
-          "id": "width",
-          "label": "Width",
-          "type": "int",
-          "default": 1024,
-          "min": 512,
-          "max": 1280
-        },
-        {
-          "id": "height",
-          "label": "Height",
-          "type": "int",
-          "default": 1024,
-          "min": 512,
-          "max": 1280
-        },
-        {
-          "id": "steps",
-          "label": "Steps",
-          "type": "int",
-          "default": 25,
-          "min": 10,
-          "max": 50
-        },
-        {
-          "id": "guidance_scale",
-          "label": "Guidance Scale",
-          "type": "float",
+          "id": "num_inference_steps",
+          "label": "Inference Steps",
+          "type": "select",
           "default": 6,
+          "options": [
+            { "value": 4,  "label": "Fast (4)" },
+            { "value": 6,  "label": "Balanced (6)" },
+            { "value": 10, "label": "Quality (10)" }
+          ],
+          "tooltip": "Number of diffusion steps for X-Part generation. More steps = better part boundaries, slower."
+        },
+        {
+          "id": "octree_resolution",
+          "label": "Mesh Resolution",
+          "type": "select",
+          "default": 128,
+          "options": [
+            { "value": 96,  "label": "Low (96)" },
+            { "value": 128, "label": "Medium (128)" },
+            { "value": 192, "label": "High (192) — needs 16+ GB VRAM" },
+            { "value": 256, "label": "Very High (256) — needs 24+ GB VRAM" }
+          ],
+          "tooltip": "Marching-cubes octree resolution. Higher = finer output mesh detail but much more VRAM."
+        },
+        {
+          "id": "num_chunks",
+          "label": "Decode Chunks",
+          "type": "select",
+          "default": 8192,
+          "options": [
+            { "value": 2048,  "label": "Very Low VRAM (2048)" },
+            { "value": 4096,  "label": "Low VRAM (4096)" },
+            { "value": 8192,  "label": "Balanced (8192)" },
+            { "value": 16384, "label": "Fast (16384)" }
+          ],
+          "tooltip": "Marching-cubes chunk size. Lower = less peak VRAM per step. Use 2048-4096 for 12 GB GPUs."
+        },
+        {
+          "id": "max_parts",
+          "label": "Max Parts",
+          "type": "int",
+          "default": 3,
           "min": 1,
-          "max": 10
+          "max": 8,
+          "tooltip": "Maximum number of parts to decompose the mesh into. Higher values need more VRAM and time."
+        },
+        {
+          "id": "bbox_decimate_faces",
+          "label": "BBox Decimate Target",
+          "type": "select",
+          "default": 100000,
+          "options": [
+            { "value": 50000,  "label": "50k — very fast bbox (lower quality)" },
+            { "value": 100000, "label": "100k — fast bbox (recommended)" },
+            { "value": 250000, "label": "250k — slower bbox (better quality)" },
+            { "value": 0,      "label": "Off — use full mesh (may hang on dense meshes)" }
+          ],
+          "tooltip": "Decimates the mesh to this face count before SAM bounding-box prediction. Full-resolution meshes with 500k+ faces will hang without decimation. Set to Off only if your mesh is already low-poly."
         },
         {
           "id": "seed",
           "label": "Seed",
           "type": "int",
-          "default": 0,
+          "default": 42,
           "min": 0,
-          "max": 4294967295
+          "max": 4294967295,
+          "tooltip": "Change if decomposition result is unsatisfying."
         }
       ]
     }
   ],
-  "generator_class": "HunyuanDiT12Generator"
+  "generator_class": "Hunyuan3DPartGenerator"
 }
