@@ -122,6 +122,7 @@ def setup(python_exe, ext_dir, gpu_sm):
         "safetensors",
         "huggingface_hub",
         "psutil",
+        "easydict",
     )
 
     # triton: Linux-only
