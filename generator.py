@@ -219,10 +219,15 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         if self._pipeline is not None:
             return
 
-        bundle_root = self.model_dir / "decompose-mesh"
-        if not bundle_root.exists():
+        # Modly already points model_dir at the per-node bundle
+        # (…/models/hunyuan3d-part/decompose-mesh) — the same folder the HF repo
+        # downloaded into (model/, conditioner/, shapevae/, scheduler/, p3sam/).
+        # Do NOT append "decompose-mesh" again.
+        bundle_root = self.model_dir
+        if not (bundle_root / "p3sam" / "p3sam.safetensors").exists():
             raise RuntimeError(
-                "%s decompose-mesh weights not found at %s.\n"
+                "%s Weights not found under %s.\n"
+                "Expected subfolders: model/, conditioner/, shapevae/, scheduler/, p3sam/.\n"
                 "Run the extension's setup again to re-download." % (_LOG, bundle_root)
             )
 
