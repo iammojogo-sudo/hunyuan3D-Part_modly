@@ -82,7 +82,7 @@ def setup(python_exe, ext_dir, gpu_sm):
     elif gpu_sm >= 70:
         torch_index = "https://download.pytorch.org/whl/cu124"
         torch_pkgs  = ["torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0"]
-        spconv_pkg  = "spconv-cu120"  # cu120 wheel is compatible across CUDA 12.x
+        spconv_pkg  = "spconv-cu124"  # match upstream requirements.txt + torch cu124 (Ada needs this)
         pyg_url     = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
         print("[setup] SM %d -> PyTorch 2.6.0 + CUDA 12.4" % gpu_sm)
     else:
