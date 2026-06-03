@@ -76,14 +76,20 @@ def setup(python_exe, ext_dir, gpu_sm):
     if gpu_sm >= 100:
         torch_index = "https://download.pytorch.org/whl/cu128"
         torch_pkgs  = ["torch>=2.7.0", "torchvision>=0.22.0", "torchaudio>=2.7.0"]
+        spconv_pkg  = "spconv-cu126"  # no cu128 wheel exists yet (see warning below)
+        pyg_url     = "https://data.pyg.org/whl/torch-2.7.0+cu128.html"
         print("[setup] SM %d (Blackwell) -> PyTorch 2.7 + CUDA 12.8" % gpu_sm)
     elif gpu_sm >= 70:
         torch_index = "https://download.pytorch.org/whl/cu124"
         torch_pkgs  = ["torch==2.6.0", "torchvision==0.21.0", "torchaudio==2.6.0"]
+        spconv_pkg  = "spconv-cu120"  # cu120 wheel is compatible across CUDA 12.x
+        pyg_url     = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
         print("[setup] SM %d -> PyTorch 2.6.0 + CUDA 12.4" % gpu_sm)
     else:
         torch_index = "https://download.pytorch.org/whl/cu118"
         torch_pkgs  = ["torch==2.5.1", "torchvision==0.20.1", "torchaudio==2.5.1"]
+        spconv_pkg  = "spconv-cu118"
+        pyg_url     = "https://data.pyg.org/whl/torch-2.5.1+cu118.html"
         print("[setup] SM %d (legacy) -> PyTorch 2.5.1 + CUDA 11.8" % gpu_sm)
 
     print("[setup] Installing PyTorch...")
@@ -116,6 +122,7 @@ def setup(python_exe, ext_dir, gpu_sm):
         "numpy",
         "scipy",
         "scikit-image",
+        "scikit-learn",      # P3-SAM AutoMask (PCA)
         "trimesh",
         "pymeshlab",
         "tqdm",
@@ -123,9 +130,39 @@ def setup(python_exe, ext_dir, gpu_sm):
         "huggingface_hub",
         "psutil",
         "easydict",
-        "addict",
-        "spconv"
+        "addict",            # Sonata config
+        "numba",             # P3-SAM AutoMask (face adjacency)
+        "torchdiffeq",       # diffusion transport integrator
+        "fpsample==0.3.3",   # P3-SAM AutoMask FPS — pin <1.0: 1.0+ has no win wheel + changed API
+        "pyyaml",
+        "packaging",
     )
+
+    # ------------------------------------------------------------------ #
+    # Sparse conv + PyG ops (Sonata encoder, VAE FPS) — CUDA-matched
+    # ------------------------------------------------------------------ #
+    print("[setup] Installing spconv (%s)..." % spconv_pkg)
+    try:
+        pip(venv, "install", spconv_pkg)
+    except subprocess.CalledProcessError:
+        print("[setup] WARNING: %s failed. On Blackwell / CUDA 12.8 there is no "
+              "prebuilt spconv wheel yet — the Sonata encoder will not load until "
+              "spconv is built from source for your CUDA." % spconv_pkg)
+
+    print("[setup] Installing torch-scatter / torch-cluster from %s ..." % pyg_url)
+    try:
+        pip(venv, "install", "torch-scatter", "torch-cluster", "-f", pyg_url)
+    except subprocess.CalledProcessError:
+        print("[setup] WARNING: torch-scatter/torch-cluster failed — confirm %s "
+              "lists wheels for your exact torch build." % pyg_url)
+
+    # flash-attn is optional: Sonata uses standard attention without it.
+    # No simple Windows wheel exists, so this is best-effort and non-fatal.
+    print("[setup] Installing flash-attn (optional, non-fatal)...")
+    try:
+        pip(venv, "install", "flash-attn", "--no-build-isolation")
+    except subprocess.CalledProcessError:
+        print("[setup] flash-attn not installed — fine, Sonata falls back to standard attention.")
 
     # triton: Linux-only
     if not IS_WIN:
