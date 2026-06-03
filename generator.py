@@ -168,6 +168,15 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         if str(xpart_dir) not in sys.path:
             sys.path.insert(0, str(xpart_dir))
 
+        # auto_mask_api.py does `sys.path.append("../P3-SAM"); from model import ...`,
+        # but that path is relative to the CWD and doesn't resolve in Modly's
+        # subprocess. Put the P3-SAM folder on sys.path explicitly so its
+        # model.py imports as top-level `model`. (model.py then bootstraps its
+        # own deps via a __file__-relative path, so nothing else is needed.)
+        p3sam_dir = repo_dir / "P3-SAM"
+        if p3sam_dir.exists() and str(p3sam_dir) not in sys.path:
+            sys.path.insert(0, str(p3sam_dir))
+
     # ------------------------------------------------------------------
     # SDP patch — applied once globally per process
     # ------------------------------------------------------------------
