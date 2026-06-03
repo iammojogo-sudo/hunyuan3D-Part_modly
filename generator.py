@@ -249,6 +249,11 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         # and bbox predictor are built.
         self._patch_sonata()
 
+        # Shrink P3-SAM's hardcoded segmentation tensors so they fit in 12 GB
+        # and don't trip the Windows GPU watchdog. Must run before the bbox
+        # predictor module is imported by from_pretrained().
+        self._patch_p3sam_memory()
+
         self._pipeline = self._PartFormerPipeline.from_pretrained(
             str(bundle_root),
             device=device,
@@ -256,7 +261,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         )
         self._pipeline.to(device=device, dtype=self._dtype)
 
-        self._patch_encoder_pc_sizes()
         self._patch_bbox_predictor()
 
         print("%s PartFormerPipeline loaded." % _LOG)
@@ -330,14 +334,39 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         else:
             print("%s Could not patch Sonata — flash_attn may still be required." % _LOG)
 
-    def _patch_encoder_pc_sizes(self):
-        """Cap point-cloud sizes in the conditioner encoders for 12 GB VRAM."""
-        for _, module in self._pipeline.conditioner.named_modules():
-            if hasattr(module, "pc_size") and int(module.pc_size) > 1024:
-                module.pc_size = 1024
-            if hasattr(module, "pc_sharpedge_size"):
-                module.pc_sharpedge_size = 0
-        print("%s Encoder pc_size capped at 1024." % _LOG)
+    def _patch_p3sam_memory(self):
+        """
+        Shrink P3-SAM's segmentation tensors to fit 12 GB / avoid the Windows
+        GPU watchdog (TDR). Upstream hardcodes, inside the function body:
+            point_num = 100000   # surface points fed to the Sonata encoder
+            bs        = 64        # prompt batch size in get_mask()
+        get_mask() then builds a [point_num, bs, 512] tensor (~6.5 GB at 100000x64
+        in fp16, several copies), which overruns 12 GB and gets the process killed
+        with no traceback. These are baked into the source, so we rewrite them on
+        disk before the module is imported. Idempotent; re-applied after reinstall.
+        Lowering bs is quality-neutral; lowering point_num is a mild tradeoff.
+        """
+        api = (Path(__file__).parent / "Hunyuan3D-Part" / "XPart" / "partgen"
+               / "bbox_estimator" / "auto_mask_api.py")
+        if not api.exists():
+            print("%s auto_mask_api.py not found — skipping P3-SAM memory patch." % _LOG)
+            return
+        try:
+            src = api.read_text(encoding="utf-8")
+        except Exception as e:
+            print("%s Could not read auto_mask_api.py (%s)." % (_LOG, e))
+            return
+
+        new = src.replace("point_num = 100000", "point_num = 50000")
+        new = new.replace("bs = 64", "bs = 8")
+
+        if new == src:
+            return  # already patched (or upstream changed)
+        try:
+            api.write_text(new, encoding="utf-8")
+            print("%s P3-SAM memory reduced (point_num=50000, prompt batch=8)." % _LOG)
+        except Exception as e:
+            print("%s Could not write P3-SAM memory patch (%s)." % (_LOG, e))
 
     def _patch_bbox_predictor(self):
         """
