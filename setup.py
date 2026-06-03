@@ -123,7 +123,8 @@ def setup(python_exe, ext_dir, gpu_sm):
         "huggingface_hub",
         "psutil",
         "easydict",
-        "addict"
+        "addict",
+        "spconv"
     )
 
     # triton: Linux-only
