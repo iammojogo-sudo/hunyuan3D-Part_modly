@@ -244,9 +244,10 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         import torch
         device = torch.device(self._device)
 
-        # Sonata's config enables flash-attn, which has no Windows wheel.
-        # Force the standard-attention path before the conditioner is built.
-        self._patch_sonata_no_flash()
+        # Sonata needs runtime fixes to load here (flash off on both import
+        # copies, plus a hardcoded download path). Apply before the conditioner
+        # and bbox predictor are built.
+        self._patch_sonata()
 
         self._pipeline = self._PartFormerPipeline.from_pretrained(
             str(bundle_root),
