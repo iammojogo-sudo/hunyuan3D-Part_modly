@@ -235,6 +235,10 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         import torch
         device = torch.device(self._device)
 
+        # Sonata's config enables flash-attn, which has no Windows wheel.
+        # Force the standard-attention path before the conditioner is built.
+        self._patch_sonata_no_flash()
+
         self._pipeline = self._PartFormerPipeline.from_pretrained(
             str(bundle_root),
             device=device,
@@ -246,6 +250,35 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         self._patch_bbox_predictor()
 
         print("%s PartFormerPipeline loaded." % _LOG)
+
+    def _patch_sonata_no_flash(self):
+        """
+        Force the Sonata point encoder onto its non-flash-attention path.
+
+        flash-attn has no prebuilt Windows wheel and the upstream sonata.json
+        sets enable_flash=True, which hard-asserts flash_attn is installed.
+        Patching PointTransformerV3 to build with enable_flash=False uses the
+        standard attention kernels instead — identical weights, just slower.
+        """
+        try:
+            from partgen.models.sonata.model import PointTransformerV3
+        except Exception as e:
+            print("%s Could not patch Sonata flash attention (%s) — "
+                  "flash_attn may still be required." % (_LOG, e))
+            return
+
+        if getattr(PointTransformerV3, "_modly_noflash", False):
+            return
+
+        _orig_init = PointTransformerV3.__init__
+
+        def _init_noflash(inner_self, *args, **kwargs):
+            kwargs["enable_flash"] = False
+            return _orig_init(inner_self, *args, **kwargs)
+
+        PointTransformerV3.__init__ = _init_noflash
+        PointTransformerV3._modly_noflash = True
+        print("%s Sonata flash attention disabled (using standard attention)." % _LOG)
 
     def _patch_encoder_pc_sizes(self):
         """Cap point-cloud sizes in the conditioner encoders for 12 GB VRAM."""
