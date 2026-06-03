@@ -65,6 +65,71 @@ def _fast_geometric_aabb(mesh, n):
     return np.array(boxes)
 
 
+def _weld_and_clean(geom):
+    """Weld duplicate verts and strip NaN/inf/degenerate/duplicate faces."""
+    try:
+        geom.remove_infinite_values()
+    except Exception:
+        pass
+    try:
+        geom.merge_vertices()
+    except Exception:
+        pass
+    try:
+        geom.update_faces(geom.nondegenerate_faces())
+        geom.update_faces(geom.unique_faces())
+        geom.remove_unreferenced_vertices()
+    except Exception:
+        pass
+    return geom
+
+
+def _cluster_decimate(vertices, faces, target_faces):
+    """
+    Pure-numpy vertex-clustering decimation. Always runs with only numpy
+    installed (no fast-simplification / open3d backend required). Snaps verts
+    onto an adaptive grid, welds per cell, drops collapsed faces. Used as the
+    guaranteed fallback when simplify_quadric_decimation is unavailable.
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    f = np.asarray(faces, dtype=np.int64)
+    if len(f) <= target_faces or len(v) == 0:
+        return v, f
+
+    mn = v.min(axis=0)
+    mx = v.max(axis=0)
+    span = np.maximum(mx - mn, 1e-9)
+
+    ratio = float(target_faces) / float(len(f))
+    res = max(2, int(round((len(v) * ratio) ** (1.0 / 3.0)) * 2))
+
+    for _ in range(8):
+        cell = np.floor((v - mn) / span * res).astype(np.int64)
+        cell = np.clip(cell, 0, res - 1)
+        key = (cell[:, 0] * res + cell[:, 1]) * res + cell[:, 2]
+        uniq, inv = np.unique(key, return_inverse=True)
+        inv = inv.reshape(-1)  # numpy 2.0 shape-safety
+
+        counts = np.bincount(inv, minlength=len(uniq)).astype(np.float64)
+        new_v = np.zeros((len(uniq), 3), dtype=np.float64)
+        for axis in range(3):
+            new_v[:, axis] = np.bincount(inv, weights=v[:, axis], minlength=len(uniq)) / counts
+
+        new_f = inv[f]
+        good = (
+            (new_f[:, 0] != new_f[:, 1])
+            & (new_f[:, 1] != new_f[:, 2])
+            & (new_f[:, 0] != new_f[:, 2])
+        )
+        new_f = new_f[good]
+
+        if len(new_f) <= target_faces or res <= 2:
+            return new_v, new_f
+        res = max(2, int(res * 0.75))
+
+    return new_v, new_f
+
+
 # ---------------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------------
@@ -283,6 +348,73 @@ class Hunyuan3DPartGenerator(BaseGenerator):
                     pass
 
     # ------------------------------------------------------------------
+    # Output sanitation / cap
+    # ------------------------------------------------------------------
+
+    def _sanitize_and_cap_scene(self, scene, max_total_faces):
+        """
+        Clean every part and cap total face count before export so the host
+        renderer can load the GLB without exhausting the V8 heap. Marching-cubes
+        parts at high octree resolutions can otherwise reach tens of millions of
+        faces across max_parts geometries.
+        """
+        import trimesh
+
+        geoms = dict(scene.geometry)
+        if not geoms:
+            return scene
+
+        cleaned = {}
+        for name, geom in geoms.items():
+            if not hasattr(geom, "faces"):
+                continue
+            _weld_and_clean(geom)
+            if len(geom.faces) > 0 and len(geom.vertices) > 0:
+                cleaned[name] = geom
+
+        if not cleaned:
+            raise RuntimeError("All part geometries were empty after cleaning.")
+
+        total = sum(len(g.faces) for g in cleaned.values())
+        print("%s Output mesh: %d part(s), %d faces total." % (_LOG, len(cleaned), total))
+
+        if total <= max_total_faces:
+            out = trimesh.Scene()
+            for name, geom in cleaned.items():
+                out.add_geometry(geom, geom_name=name)
+            return out
+
+        print("%s Over budget (%d > %d) — decimating parts..." % (_LOG, total, max_total_faces))
+        out = trimesh.Scene()
+        for name, geom in cleaned.items():
+            share  = max(1, int(max_total_faces * len(geom.faces) / total))
+            target = min(len(geom.faces), share)
+            done   = False
+
+            if len(geom.faces) > target:
+                try:
+                    simplified = geom.simplify_quadric_decimation(target)
+                    if (simplified is not None
+                            and len(simplified.faces) > 0
+                            and len(simplified.faces) <= len(geom.faces)):
+                        geom = simplified
+                        done = True
+                except Exception as e:
+                    print("%s Quadric decimation unavailable for %s (%s)." % (_LOG, name, e))
+
+            if not done and len(geom.faces) > target:
+                nv, nf = _cluster_decimate(geom.vertices, geom.faces, target)
+                geom = trimesh.Trimesh(vertices=nv, faces=nf, process=False)
+                _weld_and_clean(geom)
+
+            if len(geom.faces) > 0:
+                out.add_geometry(geom, geom_name=name)
+
+        new_total = sum(len(g.faces) for g in out.geometry.values())
+        print("%s Decimated output: %d faces total." % (_LOG, new_total))
+        return out
+
+    # ------------------------------------------------------------------
     # Core decomposition
     # ------------------------------------------------------------------
 
@@ -350,6 +482,9 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
         n_out = len(scene.geometry)
         print("%s Decomposition complete: %d part(s)." % (_LOG, n_out))
+
+        out_max_faces = _safe_int(params.get("output_max_faces"), 750000)
+        scene = self._sanitize_and_cap_scene(scene, out_max_faces)
 
         self._report(progress_cb, 97, "Exporting...")
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
