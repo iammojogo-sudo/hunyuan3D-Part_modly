@@ -260,34 +260,74 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
         print("%s PartFormerPipeline loaded." % _LOG)
 
-    def _patch_sonata_no_flash(self):
+    def _patch_sonata(self):
         """
-        Force the Sonata point encoder onto its non-flash-attention path.
+        Make the Sonata point encoder load in this environment. Patches three
+        upstream issues on every loaded copy of the module:
 
-        flash-attn has no prebuilt Windows wheel and the upstream sonata.json
-        sets enable_flash=True, which hard-asserts flash_attn is installed.
-        Patching PointTransformerV3 to build with enable_flash=False uses the
-        standard attention kernels instead — identical weights, just slower.
+        1. enable_flash. Sonata configs set enable_flash=True, which asserts
+           flash_attn is installed — but flash-attn has no Windows wheel. We
+           force enable_flash=False (standard attention, identical weights).
+        2. Dual import. Sonata is imported under two module names depending on
+           the caller — partgen.models.sonata.model (the conditioner) and
+           models.sonata.model (P3-SAM's build_P3SAM, via its own sys.path).
+           Python keeps those as separate class objects, so we patch both.
+        3. download_root. P3-SAM calls sonata.load(download_root='/root/sonata'),
+           a hardcoded Linux path. We redirect it to the standard HF cache.
         """
-        try:
-            from partgen.models.sonata.model import PointTransformerV3
-        except Exception as e:
-            print("%s Could not patch Sonata flash attention (%s) — "
-                  "flash_attn may still be required." % (_LOG, e))
-            return
+        import importlib
 
-        if getattr(PointTransformerV3, "_modly_noflash", False):
-            return
+        # P3-SAM adds XPart/partgen to sys.path and does `from models import
+        # sonata`; make that alias importable now so both copies exist before
+        # anything instantiates them.
+        partgen_dir = Path(__file__).parent / "Hunyuan3D-Part" / "XPart" / "partgen"
+        if partgen_dir.exists() and str(partgen_dir) not in sys.path:
+            sys.path.insert(0, str(partgen_dir))
 
-        _orig_init = PointTransformerV3.__init__
+        for modname in ("partgen.models.sonata", "models.sonata",
+                        "partgen.models.sonata.model", "models.sonata.model"):
+            try:
+                importlib.import_module(modname)
+            except Exception:
+                pass
 
-        def _init_noflash(inner_self, *args, **kwargs):
-            kwargs["enable_flash"] = False
-            return _orig_init(inner_self, *args, **kwargs)
+        patched_flash = False
+        for name, mod in list(sys.modules.items()):
+            if mod is None:
+                continue
 
-        PointTransformerV3.__init__ = _init_noflash
-        PointTransformerV3._modly_noflash = True
-        print("%s Sonata flash attention disabled (using standard attention)." % _LOG)
+            # 1 + 2: force enable_flash=False on every PointTransformerV3 copy
+            if name.endswith("sonata.model"):
+                cls = getattr(mod, "PointTransformerV3", None)
+                if cls is not None and not getattr(cls, "_modly_noflash", False):
+                    _orig_init = cls.__init__
+
+                    def _init_noflash(inner_self, *a, __orig=_orig_init, **kw):
+                        kw["enable_flash"] = False
+                        return __orig(inner_self, *a, **kw)
+
+                    cls.__init__ = _init_noflash
+                    cls._modly_noflash = True
+                    patched_flash = True
+
+            # 3: redirect the hardcoded '/root/sonata' download path
+            if name.endswith(".sonata"):
+                load_fn = getattr(mod, "load", None)
+                if callable(load_fn) and not getattr(load_fn, "_modly_pathfix", False):
+
+                    def _load_safe(*a, __load=load_fn, **kw):
+                        dr = kw.get("download_root")
+                        if dr and str(dr).replace("\\", "/").startswith("/root"):
+                            kw["download_root"] = None  # -> ~/.cache/sonata/ckpt
+                        return __load(*a, **kw)
+
+                    _load_safe._modly_pathfix = True
+                    mod.load = _load_safe
+
+        if patched_flash:
+            print("%s Sonata patched (flash off on all copies, download path fixed)." % _LOG)
+        else:
+            print("%s Could not patch Sonata — flash_attn may still be required." % _LOG)
 
     def _patch_encoder_pc_sizes(self):
         """Cap point-cloud sizes in the conditioner encoders for 12 GB VRAM."""
