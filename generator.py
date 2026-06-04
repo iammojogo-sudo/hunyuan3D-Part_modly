@@ -261,6 +261,7 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         )
         self._pipeline.to(device=device, dtype=self._dtype)
 
+        self._patch_seg_feat_fp32()
         self._patch_bbox_predictor()
 
         print("%s PartFormerPipeline loaded." % _LOG)
@@ -367,6 +368,52 @@ class Hunyuan3DPartGenerator(BaseGenerator):
             print("%s P3-SAM memory reduced (point_num=50000, prompt batch=8)." % _LOG)
         except Exception as e:
             print("%s Could not write P3-SAM memory patch (%s)." % (_LOG, e))
+
+    def _patch_seg_feat_fp32(self):
+        """
+        Force the conditioner's Sonata segmentation-feature encoder to run in
+        fp32. spconv's fp16 implicit_gemm has no valid kernel on Ada (RTX 40xx)
+        and asserts "can't find suitable algorithm" (spconv issue #563: fp16
+        fails, fp32 is fine). The pipeline casts the conditioner to fp16, and
+        spconv re-casts its inputs to fp16 under autocast, so we force this one
+        encoder back to fp32 and disable autocast inside its forward. Its output
+        is cast back to fp16 so the rest of the fp16 pipeline is unaffected.
+        """
+        import torch
+        cond = getattr(self._pipeline, "conditioner", None)
+        enc = getattr(cond, "seg_feat_encoder", None) if cond is not None else None
+        if enc is None:
+            return
+        enc.float()
+        if getattr(enc, "_fp32_wrapped", False):
+            return
+        _orig_forward = enc.forward
+
+        def _to_half(x):
+            if torch.is_tensor(x) and x.is_floating_point():
+                return x.half()
+            return x
+
+        def _fp32_forward(*args, **kwargs):
+            with torch.autocast(device_type="cuda", enabled=False):
+                args = tuple(
+                    a.float() if torch.is_tensor(a) and a.is_floating_point() else a
+                    for a in args
+                )
+                kwargs = {
+                    k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v)
+                    for k, v in kwargs.items()
+                }
+                out = _orig_forward(*args, **kwargs)
+            if torch.is_tensor(out):
+                return _to_half(out)
+            if isinstance(out, (list, tuple)):
+                return type(out)(_to_half(o) for o in out)
+            return out
+
+        enc.forward = _fp32_forward
+        enc._fp32_wrapped = True
+        print("%s seg_feat_encoder forced to fp32 (spconv fp16 has no Ada kernel)." % _LOG)
 
     def _patch_bbox_predictor(self):
         """
