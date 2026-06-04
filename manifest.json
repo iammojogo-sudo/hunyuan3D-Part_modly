@@ -25,7 +25,7 @@
       "download_check": "p3sam/p3sam.safetensors",
       "params_schema": [
         {
-          "id": "num_inference_steps",
+          "id": "steps",
           "label": "Inference Steps",
           "type": "select",
           "default": 6,
@@ -44,14 +44,14 @@
           "type": "select",
           "default": 256,
           "options": [
-            { "value": 256, "label": "Low (256) — needs ~16+ GB VRAM" },
-            { "value": 384, "label": "medium (384) — needs ~24+ GB VRAM" },
-            { "value": 512, "label": "High(512) — needs ~32+ GB VRAM" },
+            { "value": 256, "label": "Low (256) — 12 GB+" },
+            { "value": 384, "label": "Medium (384) — 12–16 GB" },
+            { "value": 512, "label": "High (512) — 16 GB+" }
           ],
-          "tooltip": "Marching-cubes octree resolution. Higher = finer output mesh detail but much more VRAM."
+          "tooltip": "Marching-cubes octree resolution. Higher = finer output mesh detail but more VRAM and time."
         },
         {
-          "id": "num_chunks",
+          "id": "chunks",
           "label": "Decode Chunks",
           "type": "select",
           "default": 8192,
@@ -61,7 +61,7 @@
             { "value": 8192,  "label": "Balanced (8192)" },
             { "value": 16384, "label": "Fast (16384)" }
           ],
-          "tooltip": "Marching-cubes chunk size. Lower = less peak VRAM per step. Use 2048-4096 for 12 GB GPUs."
+          "tooltip": "Marching-cubes chunk size. Lower = less peak VRAM per step. Use 2048–4096 for 12 GB GPUs."
         },
         {
           "id": "max_parts",
@@ -73,7 +73,7 @@
           "tooltip": "Maximum number of parts to decompose the mesh into. Higher values need more VRAM and time."
         },
         {
-          "id": "bbox_decimate_faces",
+          "id": "decimate",
           "label": "BBox Decimate Target",
           "type": "select",
           "default": 100000,
@@ -83,7 +83,7 @@
             { "value": 250000, "label": "250k — slower bbox (better quality)" },
             { "value": 0,      "label": "Off — use full mesh (may hang on dense meshes)" }
           ],
-          "tooltip": "Decimates the mesh to this face count before SAM bounding-box prediction. Full-resolution meshes with 500k+ faces will hang without decimation. Set to Off only if your mesh is already low-poly."
+          "tooltip": "Decimates the mesh to this face count before SAM bounding-box prediction. Full-resolution meshes with 500k+ faces will hang without decimation."
         },
         {
           "id": "seed",
