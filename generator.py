@@ -8,8 +8,17 @@ import time
 import uuid
 from pathlib import Path
 
+# Must be set before CUDA is initialised (torch is imported below).
+# Allows the allocator to reuse reserved-but-unallocated blocks rather than
+# failing with OOM when fragmentation leaves no contiguous free region.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
+import torch
 from PIL import Image
+import importlib
+import trimesh
+from huggingface_hub import snapshot_download
 
 from services.generators.base import BaseGenerator, smooth_progress
 
@@ -185,7 +194,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         global _SDP_PATCHED
         if _SDP_PATCHED:
             return
-        import torch
         _orig = torch.backends.cuda.sdp_kernel
 
         def _fast_sdp(*args, **kwargs):
@@ -210,11 +218,10 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
         self._ensure_xpart_on_path()
 
-        import torch
         from partgen.partformer_pipeline import PartFormerPipeline
 
         self._device             = "cuda" if torch.cuda.is_available() else "cpu"
-        self._dtype              = torch.float16 if self._device == "cuda" else torch.float32
+        self._dtype              = torch.bfloat16 if self._device == "cuda" else torch.float32
         self._PartFormerPipeline = PartFormerPipeline
         self._pipeline           = None
         self._current_max_parts  = 3
@@ -241,7 +248,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
             )
 
         print("%s Loading PartFormerPipeline from %s ..." % (_LOG, bundle_root))
-        import torch
         device = torch.device(self._device)
 
         # Sonata needs runtime fixes to load here (flash off on both import
@@ -263,6 +269,7 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
         self._patch_seg_feat_fp32()
         self._patch_bbox_predictor()
+        self._patch_export_loop()
 
         print("%s PartFormerPipeline loaded." % _LOG)
 
@@ -281,7 +288,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         3. download_root. P3-SAM calls sonata.load(download_root='/root/sonata'),
            a hardcoded Linux path. We redirect it to the standard HF cache.
         """
-        import importlib
 
         # P3-SAM adds XPart/partgen to sys.path and does `from models import
         # sonata`; make that alias importable now so both copies exist before
@@ -377,9 +383,8 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         fails, fp32 is fine). The pipeline casts the conditioner to fp16, and
         spconv re-casts its inputs to fp16 under autocast, so we force this one
         encoder back to fp32 and disable autocast inside its forward. Its output
-        is cast back to fp16 so the rest of the fp16 pipeline is unaffected.
+        is cast back to the pipeline's dtype so the rest of the pipeline is unaffected.
         """
-        import torch
         cond = getattr(self._pipeline, "conditioner", None)
         enc = getattr(cond, "seg_feat_encoder", None) if cond is not None else None
         if enc is None:
@@ -388,10 +393,11 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         if getattr(enc, "_fp32_wrapped", False):
             return
         _orig_forward = enc.forward
+        _cast_dtype   = self._dtype   # bfloat16 normally; captured now
 
-        def _to_half(x):
+        def _to_pipeline_dtype(x):
             if torch.is_tensor(x) and x.is_floating_point():
-                return x.half()
+                return x.to(_cast_dtype)
             return x
 
         def _fp32_forward(*args, **kwargs):
@@ -406,9 +412,9 @@ class Hunyuan3DPartGenerator(BaseGenerator):
                 }
                 out = _orig_forward(*args, **kwargs)
             if torch.is_tensor(out):
-                return _to_half(out)
+                return _to_pipeline_dtype(out)
             if isinstance(out, (list, tuple)):
-                return type(out)(_to_half(o) for o in out)
+                return type(out)(_to_pipeline_dtype(o) for o in out)
             return out
 
         enc.forward = _fp32_forward
@@ -432,7 +438,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         _generator = self  # closure
 
         def _fast_predict_bbox(mesh, seed=None, **kwargs):
-            import trimesh
 
             target = int(getattr(_generator, "_current_bbox_decimate", 100000))
             work   = mesh
@@ -466,6 +471,9 @@ class Hunyuan3DPartGenerator(BaseGenerator):
                 print("%s SAM bbox prediction failed (%s) — using geometric AABB." % (_LOG, e))
                 result = _fast_geometric_aabb(mesh, getattr(_generator, "_current_max_parts", 3))
 
+            # Free SAM activation scratch before encode_cond allocates.
+            torch.cuda.empty_cache()
+
             n = getattr(_generator, "_current_max_parts", 3)
             if hasattr(result, "shape") and result.shape[0] > n:
                 result = result[:n]
@@ -474,11 +482,50 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         self._pipeline.predict_bbox = _fast_predict_bbox
         print("%s BBox predictor patched (decimation + SAM + geometric fallback)." % _LOG)
 
+    def _patch_export_loop(self):
+        """
+        Wrap the pipeline's _export so that per-part mesh export errors are
+        visible, VRAM is flushed before each VAE decode, and the upstream
+        silent failure (None mesh → add_geometry(None) → swallowed exception
+        → empty scene) is converted into a real empty trimesh.Trimesh that
+        passes add_geometry safely. Latent stats are printed so NaN/zero
+        issues show up in the log.
+        """
+        _orig_export = self._pipeline._export  # already-bound method
+
+        def _wrapped_export(latents, **kwargs):
+            torch.cuda.empty_cache()
+            with torch.no_grad():
+                _v = latents.float()
+                print("%s part latents: shape=%s min=%.4f max=%.4f nan=%s"
+                      % (_LOG, list(_v.shape),
+                         float(_v.min()), float(_v.max()),
+                         bool(torch.isnan(_v).any())), flush=True)
+            try:
+                result = _orig_export(latents=latents, **kwargs)
+                # latent2mesh_2 returns a list; some entries may be None when
+                # marching cubes finds no surface.  Replace None with an empty
+                # Trimesh so the pipeline's add_geometry call doesn't throw and
+                # silently swallow the part.
+                if isinstance(result, list):
+                    return [
+                        r if (r is not None and hasattr(r, "faces") and len(r.faces) > 0)
+                        else trimesh.Trimesh()
+                        for r in result
+                    ]
+                return result if result is not None else [trimesh.Trimesh()]
+            except Exception as e:
+                print("%s _export part failed: %s: %s" % (_LOG, type(e).__name__, e),
+                      flush=True)
+                return [trimesh.Trimesh()]
+
+        self._pipeline._export = _wrapped_export
+        print("%s Export loop patched (VRAM flush + error logging + None-mesh guard)." % _LOG)
+
     def unload(self):
         self._pipeline = None
         self._model    = None
         try:
-            import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except ImportError:
@@ -535,7 +582,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         parts at high octree resolutions can otherwise reach tens of millions of
         faces across max_parts geometries.
         """
-        import trimesh
 
         geoms = dict(scene.geometry)
         if not geoms:
@@ -596,10 +642,9 @@ class Hunyuan3DPartGenerator(BaseGenerator):
     # ------------------------------------------------------------------
 
     def _decompose(self, mesh_path, params, progress_cb=None, cancel_event=None):
-        import torch
 
         steps   = _safe_int(params.get("num_inference_steps"), 6)
-        octree  = _safe_int(params.get("octree_resolution"),   128)
+        octree  = max(256, _safe_int(params.get("octree_resolution"), 256))
         chunks  = _safe_int(params.get("num_chunks"),          8192)
         n_parts = _safe_int(params.get("max_parts"),           3)
         seed    = _safe_int(params.get("seed"),                42)
@@ -655,13 +700,24 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         scene = result[0] if isinstance(result, (list, tuple)) else result
 
         if not hasattr(scene, "geometry") or not scene.geometry:
-            raise RuntimeError("Pipeline returned an empty scene with no part geometries.")
+            raise RuntimeError(
+                "Pipeline returned an empty scene — all part exports failed. "
+                "Check the 'bad JSON' lines above for '_export part failed:' "
+                "or 'nan=True' to see the root cause."
+            )
 
         n_out = len(scene.geometry)
         print("%s Decomposition complete: %d part(s)." % (_LOG, n_out))
 
         out_max_faces = _safe_int(params.get("output_max_faces"), 750000)
         scene = self._sanitize_and_cap_scene(scene, out_max_faces)
+
+        if not scene.geometry:
+            raise RuntimeError(
+                "All generated part meshes were empty after filtering. "
+                "Check 'bad JSON' lines for 'nan=True' — latents may be "
+                "degenerate. Try lowering max_parts or octree_resolution."
+            )
 
         self._report(progress_cb, 97, "Exporting...")
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -685,7 +741,6 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         self._download_weights()
 
     def _download_weights(self):
-        from huggingface_hub import snapshot_download
 
         self.model_dir.mkdir(parents=True, exist_ok=True)
         print("%s Downloading weights from %s ..." % (_LOG, _HF_REPO_ID))
