@@ -8,10 +8,11 @@ import time
 import uuid
 from pathlib import Path
 
-# Must be set before CUDA is initialised (torch is imported below).
-# Allows the allocator to reuse reserved-but-unallocated blocks rather than
-# failing with OOM when fragmentation leaves no contiguous free region.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Force expandable segments so the CUDA allocator can defragment reserved-but-
+# idle blocks rather than OOMing when it can't find a contiguous region.
+# Must use direct assignment — setdefault silently fails if the key already
+# exists (even as an empty string) in Modly's subprocess environment.
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import numpy as np
 import torch
@@ -269,6 +270,13 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         print("%s Loading PartFormerPipeline from %s ..." % (_LOG, bundle_root))
         device = torch.device(self._device)
 
+        # Try to enable expandable segments at runtime in case the env var was
+        # set too late (runner.py may initialise CUDA before the generator loads).
+        try:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        except Exception:
+            pass  # private API — safe to ignore if not available
+
         # Sonata needs runtime fixes to load here (flash off on both import
         # copies, plus a hardcoded download path). Apply before the conditioner
         # and bbox predictor are built.
@@ -289,6 +297,7 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         self._patch_seg_feat_fp32()
         self._patch_bbox_predictor()
         self._patch_export_loop()
+        self._patch_encode_cond_memory()
 
         print("%s PartFormerPipeline loaded." % _LOG)
 
@@ -530,6 +539,40 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         self._pipeline._export = _wrapped_export
         print("%s Export loop patched (VRAM flush + error logging + None-mesh guard)." % _LOG)
 
+    def _patch_encode_cond_memory(self):
+        """
+        Temporarily offload the diffusion model and VAE to CPU before
+        encode_cond runs, then reload them for generation. The geo_encoder
+        cross-attention in encode_cond needs ~3.44 GB of VRAM in a single
+        allocation. On 12 GB cards the model weights leave only ~3.40 GB
+        free — consistently 40 MB short. Offloading diffusion (~600 MB) +
+        VAE (~400 MB) to CPU frees ~1 GB, giving the allocator enough room.
+        Both are reloaded to GPU in the finally block before generation runs.
+        """
+        _pipeline   = self._pipeline
+        _dev        = self._device
+
+        _orig_encode_cond = _pipeline.encode_cond
+
+        def _offload_encode_cond(*args, **kwargs):
+            try:
+                _pipeline.model.to("cpu")
+                _pipeline.vae.to("cpu")
+                torch.cuda.empty_cache()
+            except Exception as e:
+                print("%s CPU offload warning: %s" % (_LOG, e))
+            try:
+                return _orig_encode_cond(*args, **kwargs)
+            finally:
+                try:
+                    _pipeline.model.to(_dev)
+                    _pipeline.vae.to(_dev)
+                except Exception as e:
+                    print("%s GPU reload warning: %s" % (_LOG, e))
+
+        _pipeline.encode_cond = _offload_encode_cond
+        print("%s encode_cond patched (diffusion+VAE offloaded to CPU during conditioning)." % _LOG)
+
     def unload(self):
         self._pipeline = None
         self._model    = None
@@ -602,7 +645,32 @@ class Hunyuan3DPartGenerator(BaseGenerator):
             if not hasattr(geom, "faces"):
                 continue
             _weld_and_clean(geom)
-            if len(geom.faces) > 0 and len(geom.vertices) > 0:
+            if len(geom.faces) == 0 or len(geom.vertices) == 0:
+                continue
+            # Remove floating islands: split into connected components, keep
+            # only those that are at least 1% of the largest component's faces.
+            # This strips marching-cubes debris without touching real geometry.
+            try:
+                components = geom.split(only_watertight=False)
+                if len(components) > 1:
+                    largest = max(len(c.faces) for c in components)
+                    threshold = max(50, int(largest * 0.05))
+                    kept = [c for c in components if len(c.faces) >= threshold]
+                    if kept:
+                        import numpy as _np
+                        v_parts = [c.vertices for c in kept]
+                        f_parts, offset = [], 0
+                        for c in kept:
+                            f_parts.append(c.faces + offset)
+                            offset += len(c.vertices)
+                        geom = trimesh.Trimesh(
+                            vertices=_np.concatenate(v_parts),
+                            faces=_np.concatenate(f_parts),
+                            process=False,
+                        )
+            except Exception:
+                pass  # if split fails, keep the original
+            if len(geom.faces) > 0:
                 cleaned[name] = geom
 
         if not cleaned:
@@ -688,7 +756,9 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
         try:
             generator = torch.Generator(device=self._device).manual_seed(seed)
+
             with torch.inference_mode():
+                torch.cuda.empty_cache()   # free reserved pool before SAM + encode_cond
                 result = self._pipeline(
                     mesh_path=str(mesh_path),
                     aabb=None,
