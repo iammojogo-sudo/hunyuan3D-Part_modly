@@ -502,22 +502,11 @@ class Hunyuan3DPartGenerator(BaseGenerator):
                          float(_v.min()), float(_v.max()),
                          bool(torch.isnan(_v).any())), flush=True)
             try:
-                result = _orig_export(latents=latents, **kwargs)
-                # latent2mesh_2 returns a list; some entries may be None when
-                # marching cubes finds no surface.  Replace None with an empty
-                # Trimesh so the pipeline's add_geometry call doesn't throw and
-                # silently swallow the part.
-                if isinstance(result, list):
-                    return [
-                        r if (r is not None and hasattr(r, "faces") and len(r.faces) > 0)
-                        else trimesh.Trimesh()
-                        for r in result
-                    ]
-                return result if result is not None else [trimesh.Trimesh()]
+                return _orig_export(latents=latents, **kwargs)
             except Exception as e:
-                print("%s _export part failed: %s: %s" % (_LOG, type(e).__name__, e),
-                      flush=True)
-                return [trimesh.Trimesh()]
+                print("%s _export part failed: %s: %s"
+                      % (_LOG, type(e).__name__, e), flush=True)
+                raise  # pipeline's own try/except skips the part cleanly
 
         self._pipeline._export = _wrapped_export
         print("%s Export loop patched (VRAM flush + error logging + None-mesh guard)." % _LOG)
