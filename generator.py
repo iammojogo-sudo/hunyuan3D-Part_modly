@@ -42,6 +42,25 @@ except (AttributeError, io.UnsupportedOperation):
 
 _HF_REPO_ID  = "tencent/Hunyuan3D-Part"
 _GLB_MAGIC   = b"glTF"
+_OBJ_TOKENS  = ("# ", "v ", "vt ", "vn ", "f ", "g ", "o ", "mtllib", "usemtl")
+
+def _detect_mesh_ext(data):
+    """Return .glb or .obj for raw mesh bytes, or None if unrecognised."""
+    if not data:
+        return None
+    if data[:4] == _GLB_MAGIC:
+        return ".glb"
+    # OBJ is plain text — confirm by finding a recognised token in the first lines
+    try:
+        head = data[:512].decode("utf-8", errors="ignore")
+        for line in head.splitlines()[:15]:
+            stripped = line.strip()
+            for tok in _OBJ_TOKENS:
+                if stripped.startswith(tok):
+                    return ".obj"
+    except Exception:
+        pass
+    return None
 _LOG         = "[Hunyuan3DPartGenerator]"
 
 # SDP patch is a one-time global; track at module level so it survives
@@ -529,13 +548,15 @@ class Hunyuan3DPartGenerator(BaseGenerator):
         tmp_path = None
 
         try:
-            # Detect mesh bytes (GLB magic = "glTF")
+            # Detect format from raw bytes (GLB by magic, OBJ by text tokens)
             mesh_path = None
-            if isinstance(image_bytes, (bytes, bytearray)) and image_bytes[:4] == _GLB_MAGIC:
-                with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as f:
-                    f.write(image_bytes)
-                    tmp_path = f.name
-                mesh_path = tmp_path
+            if isinstance(image_bytes, (bytes, bytearray)):
+                ext = _detect_mesh_ext(image_bytes)
+                if ext:
+                    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                        f.write(image_bytes)
+                        tmp_path = f.name
+                    mesh_path = tmp_path
 
             # Fallback: mesh path in params
             if mesh_path is None:
@@ -547,7 +568,7 @@ class Hunyuan3DPartGenerator(BaseGenerator):
 
             if mesh_path is None:
                 raise RuntimeError(
-                    "No mesh input found. Connect a GLB mesh as the primary input "
+                    "No mesh input found. Connect a GLB or OBJ mesh as the primary input "
                     "or set mesh_path in params."
                 )
 
