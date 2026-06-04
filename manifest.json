@@ -32,7 +32,9 @@
           "options": [
             { "value": 4,  "label": "Fast (4)" },
             { "value": 6,  "label": "Balanced (6)" },
-            { "value": 10, "label": "Quality (10)" }
+            { "value": 10, "label": "Quality (10)" },
+            { "value": 15, "label": "Higher Quality (15)" },
+            { "value": 20, "label": "Highest Quality (20)" }
           ],
           "tooltip": "Number of diffusion steps for X-Part generation. More steps = better part boundaries, slower."
         },
@@ -40,12 +42,11 @@
           "id": "octree_resolution",
           "label": "Mesh Resolution",
           "type": "select",
-          "default": 128,
+          "default": 256,
           "options": [
-            { "value": 96,  "label": "Low (96)" },
-            { "value": 128, "label": "Medium (128)" },
-            { "value": 192, "label": "High (192) — needs 16+ GB VRAM" },
-            { "value": 256, "label": "Very High (256) — needs 24+ GB VRAM" }
+            { "value": 256, "label": "Low (256) — needs ~16+ GB VRAM" },
+            { "value": 384, "label": "medium (384) — needs ~24+ GB VRAM" },
+            { "value": 512, "label": "High(512) — needs ~32+ GB VRAM" },
           ],
           "tooltip": "Marching-cubes octree resolution. Higher = finer output mesh detail but much more VRAM."
         },
@@ -68,7 +69,7 @@
           "type": "int",
           "default": 3,
           "min": 1,
-          "max": 8,
+          "max": 20,
           "tooltip": "Maximum number of parts to decompose the mesh into. Higher values need more VRAM and time."
         },
         {
