@@ -4,7 +4,7 @@
   "type": "model",
   "source": "https://github.com/iammojogo-sudo/hunyuan3d-part-modly",
   "description": "Mesh part decomposition using Tencent Hunyuan3D-Part. Accepts a GLB mesh and returns a multi-part decomposed GLB.",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "author": "iammojogo",
   "vram_gb": 12,
   "tags": [
