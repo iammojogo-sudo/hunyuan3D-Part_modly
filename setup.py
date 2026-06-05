@@ -138,6 +138,13 @@ def setup(python_exe, ext_dir, gpu_sm):
         "packaging",
     )
 
+    # transformers>=4.52.0 requires torch.float8_e8m0fnu (PyTorch 2.7+ only).
+    # diffusers pulls in transformers as a transitive dep with no upper cap,
+    # so we pin it explicitly for any GPU tier below Blackwell.
+    if gpu_sm < 100:
+        print("[setup] Pinning transformers for torch 2.6 compatibility...")
+        pip(venv, "install", "transformers>=4.41.0,<4.52.0")
+
     # ------------------------------------------------------------------ #
     # Sparse conv + PyG ops (Sonata encoder, VAE FPS) — CUDA-matched
     # ------------------------------------------------------------------ #
